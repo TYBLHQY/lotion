@@ -49,12 +49,11 @@ install the package. Review the build output and install it yourself if you
 want to try it. The package uses a `+local1` version suffix, so apt can upgrade
 an earlier local build without `--reinstall`.
 
-## Publish a private release with GitHub Actions
+## Publish releases with GitHub Actions
 
 The workflow checks the official Windows installer every Monday and can also
 be started manually from the Actions tab. It reads the version from the
-installer and only builds when that version is newer than the latest private
-release.
+installer and only builds when that version is newer than the latest release.
 
 You can also publish a specific version by pushing a matching tag, for example:
 
@@ -65,8 +64,7 @@ git push origin v7.35.1
 
 The workflow builds the package on Ubuntu, checks that the package matches the
 upstream version, creates a SHA-256 checksum, and publishes both files as a
-private GitHub Release. It stops if the repository is not private. The installer
-and generated package are not committed to Git.
+GitHub Release. The installer and generated package are not committed to Git.
 
 ## What this experiment can and cannot establish
 
