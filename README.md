@@ -49,6 +49,20 @@ install the package. Review the build output and install it yourself if you
 want to try it. The package uses a `+local1` version suffix, so apt can upgrade
 an earlier local build without `--reinstall`.
 
+## Publish a private release with GitHub Actions
+
+Push a tag matching the Notion version, for example:
+
+```sh
+git tag v7.35.1
+git push origin v7.35.1
+```
+
+The workflow builds the package on Ubuntu, checks that the tag matches the
+version downloaded from Notion, creates a SHA-256 checksum, and publishes both
+files as a private GitHub Release. It stops if the repository is not private.
+The installer and generated package are not committed to Git.
+
 ## What this experiment can and cannot establish
 
 If the repacked client starts, it should use the client code and SQLite-backed

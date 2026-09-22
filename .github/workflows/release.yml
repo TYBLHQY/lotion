@@ -1,0 +1,85 @@
+name: Build and publish Notion Linux package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify repository is private
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          visibility="$(gh repo view "$GITHUB_REPOSITORY" --json visibility --jq .visibility)"
+          if [[ "$visibility" != PRIVATE ]]; then
+            echo "Refusing to publish the repackaged Notion client from a non-private repository." >&2
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential curl file p7zip-full python3 dpkg-dev
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build Debian package
+        run: ./build.sh
+
+      - name: Check package version and create checksum
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(dist/*.deb)
+          if [[ ${#packages[@]} -ne 1 ]]; then
+            echo "Expected exactly one Debian package, found ${#packages[@]}." >&2
+            exit 1
+          fi
+
+          package="${packages[0]}"
+          version="$(dpkg-deb --field "$package" Version)"
+          upstream_version="${version%+local1}"
+          expected_version="${GITHUB_REF_NAME#v}"
+          if [[ "$upstream_version" != "$expected_version" ]]; then
+            echo "Release tag $GITHUB_REF_NAME does not match packaged Notion version $version." >&2
+            exit 1
+          fi
+
+          sha256sum "$package" > "$package.sha256"
+          echo "path=$package" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish private GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<EOF
+          Personal-use Linux repack of Notion ${{ steps.package.outputs.upstream_version }}.
+
+          This package is built from Notion's official Windows installer. It is unofficial and is not affiliated with or endorsed by Notion. The release is kept private with this repository.
+          EOF
+
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.package.outputs.path }}" \
+            "${{ steps.package.outputs.path }}.sha256" \
+            --verify-tag \
+            --title "Notion ${{ steps.package.outputs.upstream_version }} for Linux" \
+            --notes-file release-notes.md
