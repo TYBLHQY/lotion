@@ -51,17 +51,22 @@ an earlier local build without `--reinstall`.
 
 ## Publish a private release with GitHub Actions
 
-Push a tag matching the Notion version, for example:
+The workflow checks the official Windows installer every Monday and can also
+be started manually from the Actions tab. It reads the version from the
+installer and only builds when that version is newer than the latest private
+release.
+
+You can also publish a specific version by pushing a matching tag, for example:
 
 ```sh
 git tag v7.35.1
 git push origin v7.35.1
 ```
 
-The workflow builds the package on Ubuntu, checks that the tag matches the
-version downloaded from Notion, creates a SHA-256 checksum, and publishes both
-files as a private GitHub Release. It stops if the repository is not private.
-The installer and generated package are not committed to Git.
+The workflow builds the package on Ubuntu, checks that the package matches the
+upstream version, creates a SHA-256 checksum, and publishes both files as a
+private GitHub Release. It stops if the repository is not private. The installer
+and generated package are not committed to Git.
 
 ## What this experiment can and cannot establish
 

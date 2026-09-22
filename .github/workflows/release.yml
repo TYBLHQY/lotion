@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  schedule:
+    - cron: '17 9 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -37,11 +40,79 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Check upstream version
+        id: upstream
+        if: github.event_name != 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe_dir="$RUNNER_TEMP/notion-upstream"
+          installer="$GITHUB_WORKSPACE/build/inputs/notion-windows-installer.exe"
+          mkdir -p "$probe_dir/installer" "$probe_dir/payload" "$(dirname "$installer")"
+
+          curl --fail --location --retry 3 \
+            'https://www.notion.so/desktop/windows/download' \
+            --output "$installer"
+          7z x -y "$installer" '$PLUGINSDIR/app-64.7z' \
+            "-o$probe_dir/installer" >/dev/null
+          payload_archive="$(find "$probe_dir/installer" -type f -name 'app-64.7z' -print -quit)"
+          if [[ -z "$payload_archive" ]]; then
+            echo 'Could not find the Notion application archive in the installer.' >&2
+            exit 1
+          fi
+          7z x -y "$payload_archive" 'resources/app.asar' \
+            "-o$probe_dir/payload" >/dev/null
+          asar_file="$probe_dir/payload/resources/app.asar"
+          if [[ ! -f "$asar_file" ]]; then
+            echo 'Could not find resources/app.asar in the installer.' >&2
+            exit 1
+          fi
+          (
+            cd "$probe_dir"
+            npx --yes @electron/asar extract-file "$asar_file" package.json
+          )
+          upstream_version="$(node -p "require('$probe_dir/package.json').version")"
+          if [[ ! "$upstream_version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "Unexpected Notion version: $upstream_version" >&2
+            exit 1
+          fi
+
+          released_versions="$(gh release list --repo "$GITHUB_REPOSITORY" \
+            --limit 100 --json tagName --jq '.[].tagName' \
+            | sed -n 's/^v//p' | grep -E '^[0-9]+(\.[0-9]+)*$' || true)"
+          latest_released="$(printf '%s\n' "$released_versions" | sort -V | tail -n 1)"
+          if [[ -n "$latest_released" ]] && \
+            [[ "$(printf '%s\n%s\n' "$latest_released" "$upstream_version" | sort -V | tail -n 1)" == "$latest_released" ]]; then
+            echo "Notion $upstream_version is not newer than the latest release v$latest_released; skipping build."
+            echo 'should_build=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "New Notion version found: $upstream_version"
+          echo "tag=v$upstream_version" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
+          echo 'should_build=true' >> "$GITHUB_OUTPUT"
+
+      - name: Select tag for pushed release
+        id: tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo 'should_build=true' >> "$GITHUB_OUTPUT"
+
       - name: Build Debian package
+        if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
         run: ./build.sh
 
       - name: Check package version and create checksum
         id: package
+        if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -55,9 +126,9 @@ jobs:
           package="${packages[0]}"
           version="$(dpkg-deb --field "$package" Version)"
           upstream_version="${version%+local1}"
-          expected_version="${GITHUB_REF_NAME#v}"
+          expected_version="${{ steps.upstream.outputs.upstream_version || steps.tag.outputs.upstream_version }}"
           if [[ "$upstream_version" != "$expected_version" ]]; then
-            echo "Release tag $GITHUB_REF_NAME does not match packaged Notion version $version." >&2
+            echo "Expected Notion $expected_version but built package version is $version." >&2
             exit 1
           fi
 
@@ -67,6 +138,7 @@ jobs:
           echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
 
       - name: Publish private GitHub Release
+        if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -77,9 +149,9 @@ jobs:
           This package is built from Notion's official Windows installer. It is unofficial and is not affiliated with or endorsed by Notion. The release is kept private with this repository.
           EOF
 
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "${{ steps.upstream.outputs.tag || steps.tag.outputs.tag }}" \
             "${{ steps.package.outputs.path }}" \
             "${{ steps.package.outputs.path }}.sha256" \
-            --verify-tag \
+            --target "$GITHUB_SHA" \
             --title "Notion ${{ steps.package.outputs.upstream_version }} for Linux" \
             --notes-file release-notes.md
