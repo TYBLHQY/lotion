@@ -52,6 +52,29 @@ print(match.group(1))
 PY
 )"
 
+# Discard stale Chromium sources but retain a matching checkout with Electron's
+# applied patch commits between repeated builds.
+if [[ -d "$SRC_DIR/.git" ]]; then
+  CURRENT_CHROMIUM_VERSION="$(awk -F= '
+    $1 == "MAJOR" { major = $2 }
+    $1 == "MINOR" { minor = $2 }
+    $1 == "BUILD" { build = $2 }
+    $1 == "PATCH" { patch = $2 }
+    END {
+      if (major && minor && build && patch) {
+        print major "." minor "." build "." patch
+      }
+    }
+  ' "$SRC_DIR/chrome/VERSION" 2>/dev/null || true)"
+  if [[ "$CURRENT_CHROMIUM_VERSION" != "$CHROMIUM_VERSION" ]]; then
+    rm -rf "$SRC_DIR"
+    mkdir -p "$SRC_DIR"
+    git clone --filter=blob:none --depth 1 --branch "v${ELECTRON_VERSION}" \
+      https://github.com/electron/electron.git "$ELECTRON_DIR"
+    git -C "$ELECTRON_DIR" checkout --detach "v${ELECTRON_VERSION}"
+  fi
+fi
+
 cat > "$BUILD_ROOT/.gclient" <<EOF
 solutions = [
   {
@@ -65,6 +88,22 @@ solutions = [
   },
 ]
 EOF
+
+# gclient's normal fetch refspec enumerates every Chromium branch on GitHub.
+# Seed a new checkout at Electron's exact tag and keep its fetch refspec narrow.
+if [[ ! -d "$SRC_DIR/.git" ]]; then
+  git -C "$SRC_DIR" init
+  git -C "$SRC_DIR" remote add origin https://github.com/chromium/chromium.git
+  git -C "$SRC_DIR" config --replace-all remote.origin.fetch \
+    "+refs/tags/${CHROMIUM_VERSION}:refs/tags/${CHROMIUM_VERSION}"
+  git -C "$SRC_DIR" fetch --depth=1 --no-tags origin \
+    "refs/tags/${CHROMIUM_VERSION}:refs/tags/${CHROMIUM_VERSION}"
+  git -C "$SRC_DIR" checkout --force --detach "$CHROMIUM_VERSION"
+else
+  git -C "$SRC_DIR" remote set-url origin https://github.com/chromium/chromium.git
+  git -C "$SRC_DIR" config --replace-all remote.origin.fetch \
+    "+refs/tags/${CHROMIUM_VERSION}:refs/tags/${CHROMIUM_VERSION}"
+fi
 
 cd "$BUILD_ROOT"
 printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
