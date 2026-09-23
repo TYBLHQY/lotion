@@ -37,14 +37,29 @@ if [[ ! -d "$ELECTRON_DIR/.git" ]]; then
 fi
 git -C "$ELECTRON_DIR" checkout --detach "v${ELECTRON_VERSION}"
 
-cat > "$BUILD_ROOT/.gclient" <<'EOF'
+CHROMIUM_VERSION="$(python3 - "$ELECTRON_DIR/DEPS" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as deps_file:
+    match = re.search(
+        r"['\"]chromium_version['\"]\s*:\s*['\"]([^'\"]+)['\"]",
+        deps_file.read(),
+    )
+if not match:
+    raise SystemExit("Could not read chromium_version from Electron DEPS")
+print(match.group(1))
+PY
+)"
+
+cat > "$BUILD_ROOT/.gclient" <<EOF
 solutions = [
   {
     "name": "src/electron",
     "url": "https://github.com/electron/electron.git",
     "managed": False,
     "custom_deps": {
-      "src": "https://github.com/chromium/chromium.git",
+      "src": "https://github.com/chromium/chromium.git@${CHROMIUM_VERSION}",
     },
     "custom_vars": {},
   },
@@ -53,6 +68,7 @@ EOF
 
 cd "$BUILD_ROOT"
 printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
+printf 'Chromium revision from Electron DEPS: %s\n' "$CHROMIUM_VERSION"
 gclient sync --no-history --nohooks --jobs="${GCLIENT_JOBS:-4}"
 gclient runhooks
 
