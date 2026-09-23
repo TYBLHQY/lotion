@@ -27,8 +27,9 @@ mkdir -p "$BUILD_ROOT" "$OUTPUT_DIR"
 if [[ ! -d "$DEPOT_TOOLS_DIR/.git" ]]; then
   git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
 fi
-export PATH="$DEPOT_TOOLS_DIR:$PATH"
+export PATH="$DEPOT_TOOLS_DIR/.cipd_bin:$DEPOT_TOOLS_DIR:$PATH"
 export DEPOT_TOOLS_UPDATE=0
+"$DEPOT_TOOLS_DIR/ensure_bootstrap"
 
 if [[ ! -d "$ELECTRON_DIR/.git" ]]; then
   mkdir -p "$SRC_DIR"
@@ -106,9 +107,22 @@ else
 fi
 
 cd "$BUILD_ROOT"
-printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
-printf 'Chromium revision from Electron DEPS: %s\n' "$CHROMIUM_VERSION"
-gclient sync --no-history --nohooks --jobs="${GCLIENT_JOBS:-4}"
+SYNC_KEY="${ELECTRON_VERSION}:${CHROMIUM_VERSION}"
+SYNC_MARKER="$BUILD_ROOT/.gclient-sync-key"
+CACHED_ELECTRON_TAG="$(git -C "$ELECTRON_DIR" describe --tags --exact-match HEAD 2>/dev/null || true)"
+if [[ -f "$SYNC_MARKER" && "$(<"$SYNC_MARKER")" == "$SYNC_KEY" \
+    && "$CACHED_ELECTRON_TAG" == "v${ELECTRON_VERSION}" \
+    && -f "$BUILD_ROOT/.gclient_entries" ]] \
+    && grep -Fq "'src': 'https://github.com/chromium/chromium.git@${CHROMIUM_VERSION}'" \
+      "$BUILD_ROOT/.gclient_entries"; then
+  printf 'Using the existing Electron %s / Chromium %s dependency sync.\n' \
+    "$ELECTRON_VERSION" "$CHROMIUM_VERSION"
+else
+  printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
+  printf 'Chromium revision from Electron DEPS: %s\n' "$CHROMIUM_VERSION"
+  gclient sync --no-history --nohooks --jobs="${GCLIENT_JOBS:-4}"
+  printf '%s\n' "$SYNC_KEY" > "$SYNC_MARKER"
+fi
 # Chromium's shared Python spec includes OpenCV and data-analysis wheels for
 # unrelated tooling. Electron's GTK4 build does not use cv2, pandas, or pyarrow;
 # the Artifact Registry/Mihomo path has returned bytes failing Chromium's pinned
