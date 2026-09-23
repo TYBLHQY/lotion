@@ -168,7 +168,12 @@ fi
 printf 'Generating the GTK4 GN configuration...\n'
 cd "$SRC_DIR"
 gn gen out/Release --args='import("//electron/build/args/testing.gn") gtk_version=4 is_debug=false dcheck_always_on=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0'
-gn args out/Release --list=gtk_version | grep -F 'gtk_version = 4'
+gtk_version_args=$(gn args out/Release --list=gtk_version)
+printf '%s\n' "$gtk_version_args"
+if ! grep -Fq 'Current value = 4' <<<"$gtk_version_args"; then
+  printf 'GN did not configure GTK 4 as requested.\n' >&2
+  exit 1
+fi
 
 printf 'Building Electron %s with GTK4...\n' "$ELECTRON_VERSION"
 autoninja -C out/Release -j "${NINJA_JOBS:-4}" electron:electron_dist_zip
