@@ -109,6 +109,31 @@ cd "$BUILD_ROOT"
 printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
 printf 'Chromium revision from Electron DEPS: %s\n' "$CHROMIUM_VERSION"
 gclient sync --no-history --nohooks --jobs="${GCLIENT_JOBS:-4}"
+# Chromium's shared Python spec includes OpenCV for unrelated tooling. The
+# GTK4 Electron build does not use cv2, and the Artifact Registry has recently
+# returned a wheel that fails Chromium's pinned SHA-256 check. Remove only that
+# unused wheel from this local build's vpython spec; keep all remaining pinned
+# dependencies and their integrity checks intact.
+python3 - "$SRC_DIR/.vpython3" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as spec_file:
+    spec = spec_file.read()
+spec, removed = re.subn(
+    r'wheel: <\n  name: "infra/python/wheels/opencv_python/\$\{vpython_platform\}"\n.*?\n>\n',
+    "",
+    spec,
+    count=1,
+    flags=re.DOTALL,
+)
+if removed != 1:
+    raise SystemExit("Expected exactly one Chromium OpenCV wheel in .vpython3")
+with open(path, "w", encoding="utf-8") as spec_file:
+    spec_file.write(spec)
+print("Skipped Chromium's unused OpenCV vpython wheel for this Electron build.")
+PY
 # Electron's local build does not use sentry-cli; it is only needed by the
 # release symbol uploader. Avoid an unrelated CDN download during yarn install.
 SENTRYCLI_SKIP_DOWNLOAD=1 gclient runhooks
