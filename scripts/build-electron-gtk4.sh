@@ -109,20 +109,34 @@ fi
 cd "$BUILD_ROOT"
 SYNC_KEY="${ELECTRON_VERSION}:${CHROMIUM_VERSION}"
 SYNC_MARKER="$BUILD_ROOT/.gclient-sync-key"
-CACHED_ELECTRON_TAG="$(git -C "$ELECTRON_DIR" describe --tags --exact-match HEAD 2>/dev/null || true)"
-if [[ -f "$SYNC_MARKER" && "$(<"$SYNC_MARKER")" == "$SYNC_KEY" \
-    && "$CACHED_ELECTRON_TAG" == "v${ELECTRON_VERSION}" \
-    && -f "$BUILD_ROOT/.gclient_entries" ]] \
-    && grep -Fq "'src': 'https://github.com/chromium/chromium.git@${CHROMIUM_VERSION}'" \
-      "$BUILD_ROOT/.gclient_entries"; then
-  printf 'Using the existing Electron %s / Chromium %s dependency sync.\n' \
-    "$ELECTRON_VERSION" "$CHROMIUM_VERSION"
-else
-  printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
-  printf 'Chromium revision from Electron DEPS: %s\n' "$CHROMIUM_VERSION"
-  gclient sync --no-history --nohooks --jobs="${GCLIENT_JOBS:-4}"
-  printf '%s\n' "$SYNC_KEY" > "$SYNC_MARKER"
-fi
+# A previous interrupted Electron patch hook can leave git-am state behind.
+# Abort it before syncing, which restores each checkout to its pinned revision.
+python3 - "$ELECTRON_DIR/patches/config.json" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as config_file:
+    targets = json.load(config_file)
+for target in targets:
+    repo = target.get("repo")
+    if repo and os.path.isdir(repo):
+        subprocess.run(
+            ["git", "-C", repo, "am", "--abort"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+PY
+
+# The cached .gclient_entries file alone does not prove that Chromium's nested
+# repositories are checked out. Electron applies patches to those repositories
+# independently, so always sync the pinned dependency graph before running hooks.
+printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
+printf 'Chromium revision from Electron DEPS: %s\n' "$CHROMIUM_VERSION"
+gclient sync --no-history --nohooks --jobs="${GCLIENT_JOBS:-4}"
+printf '%s\n' "$SYNC_KEY" > "$SYNC_MARKER"
 # Chromium's shared Python spec includes OpenCV and data-analysis wheels for
 # unrelated tooling. Electron's GTK4 build does not use cv2, pandas, or pyarrow;
 # the Artifact Registry/Mihomo path has returned bytes failing Chromium's pinned
