@@ -157,33 +157,15 @@ fi
 install -m 0644 "$INSTALLER_ICON" "$APP_DIR/icon.png"
 
 printf 'Building a Debian package...\n'
-node - "$APP_DIR/package.json" "$ELECTRON_VERSION" <<'NODE'
+node - "$APP_DIR/package.json" <<'NODE'
 const fs = require('node:fs')
-const path = require('node:path')
 const packagePath = process.argv[2]
-const electronVersion = process.argv[3]
 const appPackage = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
 appPackage.author = { name: 'Local personal build', email: 'local-build@example.invalid' }
 appPackage.homepage = 'https://www.notion.com'
 appPackage.desktopName = 'local.personal.notion'
-let electronDist = null
-if (process.env.NOTION_ELECTRON_DIST) {
-  if (appPackage.devDependencies?.electron !== electronVersion) {
-    console.error(`Custom Electron ${electronVersion} does not match the app's Electron ${appPackage.devDependencies?.electron}.`)
-    process.exit(1)
-  }
-  electronDist = path.join(
-    process.env.NOTION_ELECTRON_DIST,
-    `electron-v${electronVersion}-linux-x64.zip`,
-  )
-  if (!fs.existsSync(electronDist)) {
-    console.error(`Custom Electron distribution was not found: ${electronDist}`)
-    process.exit(1)
-  }
-}
 appPackage.build = {
   ...appPackage.build,
-  ...(electronDist ? { electronDist: process.env.NOTION_ELECTRON_DIST } : {}),
   appId: 'local.personal.notion',
   productName: 'Notion',
   linux: {

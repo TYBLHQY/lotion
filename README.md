@@ -75,28 +75,6 @@ The workflow builds the package on Ubuntu, checks that the package matches the
 upstream version, creates a SHA-256 checksum, and publishes both files as a
 GitHub Release. The installer and generated package are not committed to Git.
 
-## Build a GTK4 test package
-
-Electron 43.6.0 links GTK at runtime, but the stock Notion binary in this
-repack links GTK3 directly. The `Build GTK4 Notion test package` workflow
-rebuilds Electron 43.6.0 against Chromium's GTK4 support, packages the current
-Notion installer with that Electron distribution, and uploads the `.deb` as a
-temporary Actions artifact. It does not publish a release.
-
-Chromium's source and build output need substantially more disk than a standard
-GitHub-hosted runner provides. The workflow therefore requires a dedicated
-Linux x86_64 self-hosted runner labeled `notion-gtk4`, with at least 300 GB of
-free disk, 16 GB RAM, GTK4 development files, and the Chromium build
-dependencies preinstalled. It runs only when manually dispatched; it is not
-used by pull-request or release workflows. Each Actions job has a six-hour
-limit, so rerunning after a timeout resumes from the persistent source/build
-directory on that runner.
-
-To build, open **Actions → Build GTK4 Notion test package → Run workflow**.
-Download the `notion-gtk4-deb` artifact from the completed run. Test system
-theme switching and browser sign-in before replacing the existing local
-package.
-
 ## What this experiment can and cannot establish
 
 If the repacked client starts, it should use the client code and SQLite-backed
