@@ -109,11 +109,11 @@ cd "$BUILD_ROOT"
 printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
 printf 'Chromium revision from Electron DEPS: %s\n' "$CHROMIUM_VERSION"
 gclient sync --no-history --nohooks --jobs="${GCLIENT_JOBS:-4}"
-# Chromium's shared Python spec includes OpenCV for unrelated tooling. The
-# GTK4 Electron build does not use cv2, and the Artifact Registry has recently
-# returned a wheel that fails Chromium's pinned SHA-256 check. Remove only that
-# unused wheel from this local build's vpython spec; keep all remaining pinned
-# dependencies and their integrity checks intact.
+# Chromium's shared Python spec includes OpenCV and data-analysis wheels for
+# unrelated tooling. Electron's GTK4 build does not use cv2, pandas, or pyarrow;
+# the Artifact Registry/Mihomo path has returned bytes failing Chromium's pinned
+# SHA-256 checks for its large wheels. Remove only these unused wheels from this
+# local build's vpython spec; keep all remaining pinned checks intact.
 python3 - "$SRC_DIR/.vpython3" <<'PY'
 import re
 import sys
@@ -121,18 +121,19 @@ import sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as spec_file:
     spec = spec_file.read()
-spec, removed = re.subn(
-    r'wheel: <\n  name: "infra/python/wheels/opencv_python/\$\{vpython_platform\}"\n.*?\n>\n',
-    "",
-    spec,
-    count=1,
-    flags=re.DOTALL,
-)
-if removed != 1:
-    raise SystemExit("Expected exactly one Chromium OpenCV wheel in .vpython3")
+for package in ("opencv_python", "pandas", "pyarrow"):
+    spec, removed = re.subn(
+        rf'wheel: <\n  name: "infra/python/wheels/{package}/[^"\n]+"\n.*?\n>\n',
+        "",
+        spec,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if removed > 1:
+        raise SystemExit(f"Found multiple Chromium {package} wheels in .vpython3")
 with open(path, "w", encoding="utf-8") as spec_file:
     spec_file.write(spec)
-print("Skipped Chromium's unused OpenCV vpython wheel for this Electron build.")
+print("Skipped unused Chromium OpenCV/pandas/pyarrow wheels for this Electron build.")
 PY
 # Electron's local build does not use sentry-cli; it is only needed by the
 # release symbol uploader. Avoid an unrelated CDN download during yarn install.
