@@ -2,7 +2,13 @@
 set -euo pipefail
 
 ELECTRON_VERSION="${ELECTRON_VERSION:-43.6.0}"
-BUILD_ROOT="${NOTION_ELECTRON_BUILD_ROOT:-${RUNNER_TEMP:-${HOME:?HOME must be set}/.cache}/notion-electron-gtk4-${ELECTRON_VERSION}}"
+if [[ -n "${NOTION_ELECTRON_BUILD_ROOT:-}" ]]; then
+  BUILD_ROOT="$NOTION_ELECTRON_BUILD_ROOT"
+elif [[ -n "${RUNNER_WORKSPACE:-}" ]]; then
+  BUILD_ROOT="$(dirname -- "$RUNNER_WORKSPACE")/notion-electron-gtk4-${ELECTRON_VERSION}"
+else
+  BUILD_ROOT="${HOME:?HOME must be set}/.cache/notion-electron-gtk4-${ELECTRON_VERSION}"
+fi
 DEPOT_TOOLS_DIR="$BUILD_ROOT/depot_tools"
 SRC_DIR="$BUILD_ROOT/src"
 ELECTRON_DIR="$SRC_DIR/electron"
