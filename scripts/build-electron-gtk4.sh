@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ELECTRON_VERSION="${ELECTRON_VERSION:-43.6.0}"
+BUILD_ROOT="${NOTION_ELECTRON_BUILD_ROOT:-${RUNNER_TEMP:-${HOME:?HOME must be set}/.cache}/notion-electron-gtk4-${ELECTRON_VERSION}}"
+DEPOT_TOOLS_DIR="$BUILD_ROOT/depot_tools"
+SRC_DIR="$BUILD_ROOT/src"
+ELECTRON_DIR="$SRC_DIR/electron"
+OUT_DIR="$SRC_DIR/out/Release"
+OUTPUT_DIR="${GITHUB_WORKSPACE:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}/build/inputs"
+OUTPUT_ZIP="$OUTPUT_DIR/electron-v${ELECTRON_VERSION}-linux-x64.zip"
+
+for command in git python3 pkg-config; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf 'Missing required command: %s\n' "$command" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$BUILD_ROOT" "$OUTPUT_DIR"
+if [[ ! -d "$DEPOT_TOOLS_DIR/.git" ]]; then
+  git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
+fi
+export PATH="$DEPOT_TOOLS_DIR:$PATH"
+export DEPOT_TOOLS_UPDATE=0
+
+if [[ ! -d "$ELECTRON_DIR/.git" ]]; then
+  mkdir -p "$SRC_DIR"
+  git clone --filter=blob:none --depth 1 --branch "v${ELECTRON_VERSION}" \
+    https://github.com/electron/electron.git "$ELECTRON_DIR"
+fi
+git -C "$ELECTRON_DIR" checkout --detach "v${ELECTRON_VERSION}"
+
+cat > "$BUILD_ROOT/.gclient" <<'EOF'
+solutions = [
+  {
+    "name": "src/electron",
+    "url": "https://github.com/electron/electron.git",
+    "managed": False,
+    "custom_deps": {
+      "src": "https://github.com/chromium/chromium.git",
+    },
+    "custom_vars": {},
+  },
+]
+EOF
+
+cd "$BUILD_ROOT"
+printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
+gclient sync --no-history --nohooks --jobs="${GCLIENT_JOBS:-4}"
+gclient runhooks
+
+if [[ ! -f "$SRC_DIR/build/install-build-deps.sh" ]]; then
+  printf 'Chromium dependency installer was not found after source sync.\n' >&2
+  exit 1
+fi
+if ! pkg-config --exists gtk4; then
+  printf 'GTK4 development files are missing. Install libgtk-4-dev on the build runner.\n' >&2
+  exit 1
+fi
+if [[ ! -x "$SRC_DIR/build/install-build-deps.sh" ]]; then
+  printf 'Chromium build dependency installer is missing.\n' >&2
+  exit 1
+fi
+printf 'Generating the GTK4 GN configuration...\n'
+cd "$SRC_DIR"
+gn gen out/Release --args='import("//electron/build/args/testing.gn") gtk_version=4 is_debug=false dcheck_always_on=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0'
+gn args out/Release --list=gtk_version | grep -F 'gtk_version = 4'
+
+printf 'Building Electron %s with GTK4...\n' "$ELECTRON_VERSION"
+autoninja -C out/Release -j "${NINJA_JOBS:-4}" electron:electron_dist_zip
+if [[ ! -f "$OUT_DIR/dist.zip" ]]; then
+  printf 'Electron build completed without the expected dist.zip.\n' >&2
+  exit 1
+fi
+
+install -m 0644 "$OUT_DIR/dist.zip" "$OUTPUT_ZIP"
+printf 'GTK4 Electron distribution ready: %s\n' "$OUTPUT_ZIP"

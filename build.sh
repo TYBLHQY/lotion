@@ -157,15 +157,33 @@ fi
 install -m 0644 "$INSTALLER_ICON" "$APP_DIR/icon.png"
 
 printf 'Building a Debian package...\n'
-node - "$APP_DIR/package.json" <<'NODE'
+node - "$APP_DIR/package.json" "$ELECTRON_VERSION" <<'NODE'
 const fs = require('node:fs')
+const path = require('node:path')
 const packagePath = process.argv[2]
+const electronVersion = process.argv[3]
 const appPackage = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
 appPackage.author = { name: 'Local personal build', email: 'local-build@example.invalid' }
 appPackage.homepage = 'https://www.notion.com'
 appPackage.desktopName = 'local.personal.notion'
+let electronDist = null
+if (process.env.NOTION_ELECTRON_DIST) {
+  if (appPackage.devDependencies?.electron !== electronVersion) {
+    console.error(`Custom Electron ${electronVersion} does not match the app's Electron ${appPackage.devDependencies?.electron}.`)
+    process.exit(1)
+  }
+  electronDist = path.join(
+    process.env.NOTION_ELECTRON_DIST,
+    `electron-v${electronVersion}-linux-x64.zip`,
+  )
+  if (!fs.existsSync(electronDist)) {
+    console.error(`Custom Electron distribution was not found: ${electronDist}`)
+    process.exit(1)
+  }
+}
 appPackage.build = {
   ...appPackage.build,
+  ...(electronDist ? { electronDist: process.env.NOTION_ELECTRON_DIST } : {}),
   appId: 'local.personal.notion',
   productName: 'Notion',
   linux: {
@@ -196,17 +214,19 @@ while IFS= read -r -d '' DEB_PACKAGE; do
   dpkg-deb --raw-extract "$DEB_PACKAGE" "$PACKAGE_STAGING"
   install -m 0644 "$INSTALLER_ICON" "$PACKAGE_STAGING/opt/Notion/icon.png"
   install -m 0644 "$INSTALLER_ICON" "$PACKAGE_STAGING/opt/Notion/resources/aboutIcon.png"
+  install -m 0755 "$PROJECT_ROOT/launch-notion.sh" "$PACKAGE_STAGING/opt/Notion/notion-launcher"
   DESKTOP_FILE="$(find "$PACKAGE_STAGING/usr/share/applications" -maxdepth 1 -type f -name '*.desktop' -print -quit)"
   if [[ ! -f "$DESKTOP_FILE" ]]; then
     printf 'Could not find the generated Notion desktop entry.\n' >&2
     exit 1
   fi
   sed --in-place 's|^Icon=.*$|Icon=/opt/Notion/icon.png|' "$DESKTOP_FILE"
+  sed --in-place 's|^Exec=.*$|Exec=/opt/Notion/notion-launcher %U|' "$DESKTOP_FILE"
   if ! grep -Fxq "Version: $APP_VERSION" "$PACKAGE_STAGING/DEBIAN/control"; then
     printf 'Could not find the expected upstream package version in the control file.\n' >&2
     exit 1
   fi
-  sed --in-place "s/^Version: $APP_VERSION$/Version: $APP_VERSION+local1/" "$PACKAGE_STAGING/DEBIAN/control"
+  sed --in-place "s/^Version: $APP_VERSION$/Version: $APP_VERSION+local2/" "$PACKAGE_STAGING/DEBIAN/control"
   POST_INSTALL_SCRIPT="$PACKAGE_STAGING/DEBIAN/postinst"
   sed --in-place \
     -e '/^if hash update-mime-database /,/^fi$/d' \
@@ -228,7 +248,7 @@ while IFS= read -r -d '' DEB_PACKAGE; do
 done < <(find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print0)
 
 BUILT_PACKAGE="$(find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print -quit)"
-FINAL_PACKAGE="$PROJECT_ROOT/dist/Notion_${APP_VERSION}+local1_amd64.deb"
+FINAL_PACKAGE="$PROJECT_ROOT/dist/Notion_${APP_VERSION}+local2_amd64.deb"
 mv -f "$BUILT_PACKAGE" "$FINAL_PACKAGE"
 
 printf 'Build complete. Debian package(s) are in %s\n' "$PROJECT_ROOT/dist"
