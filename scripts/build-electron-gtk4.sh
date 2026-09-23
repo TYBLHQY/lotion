@@ -109,7 +109,9 @@ cd "$BUILD_ROOT"
 printf 'Synchronizing Electron %s and its pinned Chromium source...\n' "$ELECTRON_VERSION"
 printf 'Chromium revision from Electron DEPS: %s\n' "$CHROMIUM_VERSION"
 gclient sync --no-history --nohooks --jobs="${GCLIENT_JOBS:-4}"
-gclient runhooks
+# Electron's local build does not use sentry-cli; it is only needed by the
+# release symbol uploader. Avoid an unrelated CDN download during yarn install.
+SENTRYCLI_SKIP_DOWNLOAD=1 gclient runhooks
 
 if [[ ! -f "$SRC_DIR/build/install-build-deps.sh" ]]; then
   printf 'Chromium dependency installer was not found after source sync.\n' >&2
