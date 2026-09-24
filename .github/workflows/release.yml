@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   build-and-release:
+    if: ${{ github.event_name != 'push' || !contains(github.ref_name, '+local') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Check out source
@@ -114,7 +115,7 @@ jobs:
 
           package="${packages[0]}"
           version="$(dpkg-deb --field "$package" Version)"
-          upstream_version="${version%+local2}"
+          upstream_version="${version%+local3}"
           expected_version="${{ steps.upstream.outputs.upstream_version || steps.tag.outputs.upstream_version }}"
           if [[ "$upstream_version" != "$expected_version" ]]; then
             echo "Expected Notion $expected_version but built package version is $version." >&2

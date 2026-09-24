@@ -178,6 +178,11 @@ appPackage.build = {
 fs.writeFileSync(packagePath, `${JSON.stringify(appPackage, null, 2)}\n`)
 NODE
 APP_VERSION="$(node -p "require('$APP_DIR/package.json').version")"
+APP_PROTOCOL="$(node -p "require('$APP_DIR/config.json').protocol")"
+if [[ ! "$APP_PROTOCOL" =~ ^[a-z][a-z0-9+.-]*$ ]]; then
+  printf 'Unexpected desktop URL protocol: %s\n' "$APP_PROTOCOL" >&2
+  exit 1
+fi
 cd "$APP_DIR"
 npx --yes electron-builder --linux deb --config.npmRebuild=false --publish never
 
@@ -204,11 +209,18 @@ while IFS= read -r -d '' DEB_PACKAGE; do
   fi
   sed --in-place 's|^Icon=.*$|Icon=/opt/Notion/icon.png|' "$DESKTOP_FILE"
   sed --in-place 's|^Exec=.*$|Exec=/opt/Notion/notion-launcher %U|' "$DESKTOP_FILE"
+  if ! grep -Fq "x-scheme-handler/$APP_PROTOCOL;" "$DESKTOP_FILE"; then
+    if grep -q '^MimeType=' "$DESKTOP_FILE"; then
+      sed --in-place "/^MimeType=/s|\$|x-scheme-handler/$APP_PROTOCOL;|" "$DESKTOP_FILE"
+    else
+      printf 'MimeType=x-scheme-handler/%s;\n' "$APP_PROTOCOL" >> "$DESKTOP_FILE"
+    fi
+  fi
   if ! grep -Fxq "Version: $APP_VERSION" "$PACKAGE_STAGING/DEBIAN/control"; then
     printf 'Could not find the expected upstream package version in the control file.\n' >&2
     exit 1
   fi
-  sed --in-place "s/^Version: $APP_VERSION$/Version: $APP_VERSION+local2/" "$PACKAGE_STAGING/DEBIAN/control"
+  sed --in-place "s/^Version: $APP_VERSION$/Version: $APP_VERSION+local3/" "$PACKAGE_STAGING/DEBIAN/control"
   POST_INSTALL_SCRIPT="$PACKAGE_STAGING/DEBIAN/postinst"
   sed --in-place \
     -e '/^if hash update-mime-database /,/^fi$/d' \
@@ -218,6 +230,18 @@ while IFS= read -r -d '' DEB_PACKAGE; do
     printf 'The generated post-install script still rebuilds global desktop caches.\n' >&2
     exit 1
   fi
+  cat >> "$POST_INSTALL_SCRIPT" <<'SH'
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications || true
+fi
+SH
+  cat >> "$PACKAGE_STAGING/DEBIAN/postrm" <<'SH'
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications || true
+fi
+SH
   (
     cd "$PACKAGE_STAGING"
     find . -type f ! -path './DEBIAN/*' -print0 \
@@ -230,7 +254,7 @@ while IFS= read -r -d '' DEB_PACKAGE; do
 done < <(find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print0)
 
 BUILT_PACKAGE="$(find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print -quit)"
-FINAL_PACKAGE="$PROJECT_ROOT/dist/Notion_${APP_VERSION}+local2_amd64.deb"
+FINAL_PACKAGE="$PROJECT_ROOT/dist/Notion_${APP_VERSION}+local3_amd64.deb"
 mv -f "$BUILT_PACKAGE" "$FINAL_PACKAGE"
 
 printf 'Build complete. Debian package(s) are in %s\n' "$PROJECT_ROOT/dist"

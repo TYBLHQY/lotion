@@ -16,7 +16,7 @@ create a Debian package. The launcher preserves the normal desktop config path
 and leaves `GTK_THEME` unset, so default browser associations remain available
 and Notion can follow the system theme. It pins Notion's user data to the usual
 `$XDG_CONFIG_HOME/Notion` path, preserving the existing profile, local database,
-and sign-in state. The generated package gets a `+local2` Debian version suffix
+and sign-in state. The generated package gets a `+local3` Debian version suffix
 so it upgrades the previous local build.
 
 The launcher uses XIM for GTK input-method integration. This is a per-Notion
@@ -55,8 +55,13 @@ NOTION_INSTALLER_PATH=/path/to/NotionSetup.exe ./build.sh
 
 The script writes the Debian package under `dist/`. It deliberately does not
 install the package. Review the build output and install it yourself if you
-want to try it. The package uses a `+local2` version suffix, so apt can upgrade
+want to try it. The package uses a `+local3` version suffix, so apt can upgrade
 the previous local build without `--reinstall`.
+
+The package registers Notion's `notion://` URL handler with the Linux desktop,
+so the browser can return a completed sign-in to the app. If another application
+owns that handler, select Notion as the default with
+`xdg-mime default local.personal.notion.desktop x-scheme-handler/notion`.
 
 ## Publish releases with GitHub Actions
 
