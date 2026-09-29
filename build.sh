@@ -61,6 +61,43 @@ if [[ ! -x "$APP_EXECUTABLE" ]]; then
   exit 1
 fi
 
+# Electron Flatpaks commonly use a command wrapper that invokes Zypak. Zypak
+# only works inside Flatpak's sandbox, so launch the wrapped Electron binary
+# directly in the standalone Debian package.
+APP_LAUNCH_RELATIVE="bin/$APP_COMMAND"
+WRAPPER_TARGET="$(python3 - "$APP_EXECUTABLE" <<'PY'
+import shlex
+import sys
+
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except (OSError, UnicodeDecodeError):
+    raise SystemExit(0)
+for line in lines:
+    try:
+        words = shlex.split(line, comments=True)
+    except ValueError:
+        continue
+    if "zypak-wrapper" in words:
+        index = words.index("zypak-wrapper")
+        if index + 1 < len(words):
+            print(words[index + 1])
+            break
+PY
+)"
+if [[ -n "$WRAPPER_TARGET" ]]; then
+  if [[ "$WRAPPER_TARGET" != /app/* ]]; then
+    printf 'The Electron Flatpak wrapper points outside its app payload: %s\n' "$WRAPPER_TARGET" >&2
+    exit 1
+  fi
+  APP_LAUNCH_RELATIVE="${WRAPPER_TARGET#/app/}"
+  APP_LAUNCH_EXECUTABLE="$APP_FILES/$APP_LAUNCH_RELATIVE"
+  if [[ ! -x "$APP_LAUNCH_EXECUTABLE" ]]; then
+    printf 'The Electron Flatpak wrapper target is missing or not executable: %s\n' "$APP_LAUNCH_EXECUTABLE" >&2
+    exit 1
+  fi
+fi
+
 APP_VERSION="$(flatpak info --user "$APP_ID" | sed -n 's/^Version:[[:space:]]*//p' | head -n 1)"
 if [[ -z "$APP_VERSION" ]]; then
   APP_VERSION="$(python3 - "$APP_FILES" <<'PY'
@@ -161,7 +198,7 @@ if [[ ! -e "$user_data" && -d "$flatpak_profile" ]]; then
   cp -a "$flatpak_profile" "$user_data"
 fi
 
-executable="$APP/bin/@APP_COMMAND@"
+executable="$APP/@APP_LAUNCH_RELATIVE@"
 if [[ "$(od -An -tx1 -N4 "$executable" | tr -d ' \n')" == 7f454c46 ]]; then
   loader=""
   case "$(uname -m)" in
@@ -176,7 +213,7 @@ exec "$executable" --user-data-dir="$user_data" "$@"
 SH
 sed -i \
   -e "s|@APP_ID@|$APP_ID|g" \
-  -e "s|@APP_COMMAND@|$APP_COMMAND|g" \
+  -e "s|@APP_LAUNCH_RELATIVE@|$APP_LAUNCH_RELATIVE|g" \
   "$STAGE/opt/Notion/notion-launcher"
 chmod 0755 "$STAGE/opt/Notion/notion-launcher"
 
