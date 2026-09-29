@@ -1,93 +1,31 @@
-# Notion Linux Repack (personal experiment)
+# Notion for Linux (DEB)
 
-This project explores whether repackaging Notion's official Windows desktop
-client for Linux preserves its local record cache and improves repeat page
-loads. It is an unofficial, personal-use experiment and is not affiliated with
-or endorsed by Notion.
+This repository builds a Debian package from Notion's official Linux Flatpak release. It bundles the Flatpak application files and its runtime libraries under `/opt/Notion`, so installing and running the resulting `.deb` does not require Flatpak. The package is intended for personal use and is not affiliated with or endorsed by Notion.
 
-## Approach
+## Build locally
 
-The build extracts the official Windows installer, rebuilds `better-sqlite3`
-for Linux, and keeps Notion's existing Linux platform paths intact. It patches
-the tray menu to use Electron's Linux context-menu API, adds the missing tray
-icon, starts Electron with GTK's XIM input method to avoid loading the GTK3
-Fcitx module implicated in theme-switch crashes, and asks `electron-builder` to
-create a Debian package. The launcher preserves the normal desktop config path
-and leaves `GTK_THEME` unset, so default browser associations remain available
-and Notion can follow the system theme. It pins Notion's user data to the usual
-`$XDG_CONFIG_HOME/Notion` path, preserving the existing profile, local database,
-and sign-in state. The generated package gets a `+local3` Debian version suffix
-so it upgrades the previous local build.
+The build downloads Notion's official `notion.flatpakref`, installs the signed app and its runtime into a temporary Flatpak user installation, then assembles a `.deb` in `dist/`.
 
-The launcher uses XIM for GTK input-method integration. This is a per-Notion
-setting; check text input in the repackaged app on your desktop before relying on
-it as a replacement for the distro's default GTK input method.
+Requirements are `flatpak`, `curl`, `dpkg-deb`, `desktop-file-validate`, and Python 3. On Debian, install the build tools with:
 
-The local Windows installer belongs at
-`build/inputs/notion-windows-installer.exe`. Build outputs and extracted
-proprietary client files stay under `build/` and `dist/`; neither directory is
-tracked by Git. Do not publish or redistribute those files. Notion's installer
-and application remain subject to their own terms.
+```sh
+sudo apt install flatpak curl desktop-file-utils python3
+```
 
-## Requirements
-
-- Linux x86_64
-- Node.js and npm
-- Network access to Notion, npm, and Electron's header distribution
-- 7-Zip (`7z`)
-- `file`, to reject a Windows-native SQLite module after the rebuild
-- `dpkg-deb` (for Debian package output)
-- A C/C++ build toolchain and Python, required when rebuilding the native
-  SQLite module
-
-## Build
+Build the package with:
 
 ```sh
 ./build.sh
 ```
 
-The build uses the project-local installer automatically. If you want to use a
-different installer, set `NOTION_INSTALLER_PATH`:
+The package registers Notion's desktop entry and `notion://` URL handler. It attempts to copy the existing Flatpak profile from `~/.var/app/com.notion.app.desktop.notion/config/Notion` to `~/.config/Notion` the first time it launches. Since this is a normal Debian package, the app runs as your user without Flatpak's sandbox.
 
-```sh
-NOTION_INSTALLER_PATH=/path/to/NotionSetup.exe ./build.sh
-```
+## Automated builds and releases
 
-The script writes the Debian package under `dist/`. It deliberately does not
-install the package. Review the build output and install it yourself if you
-want to try it. The package uses a `+local3` version suffix, so apt can upgrade
-the previous local build without `--reinstall`.
+GitHub Actions builds and smoke-tests the `.deb` whenever `main` changes. A weekly scheduled run checks Notion's official Flatpak repository, and `workflow_dispatch` can run the same check on demand. A tested build is published as a GitHub Release only when its Flatpak commit has not already been released. The release includes the `.deb` and a SHA-256 checksum.
 
-The package registers Notion's `notion://` URL handler with the Linux desktop,
-so the browser can return a completed sign-in to the app. If another application
-owns that handler, select Notion as the default with
-`xdg-mime default local.personal.notion.desktop x-scheme-handler/notion`.
+## Packaging notes
 
-## Publish releases with GitHub Actions
+The `.flatpakref` points to Notion's signed application repository and the Flathub runtime repository; it does not contain application source code. This project extracts the installed payload and bundles the application and runtime files into the Debian package. The build records the upstream application version and Flatpak commit in `dist/build-metadata.json` so each source commit can be identified and released reproducibly.
 
-The workflow checks the official Windows installer every Monday and can also
-be started manually from the Actions tab. It reads the version from the
-installer and only builds when that version is newer than the latest release.
-
-You can also publish a specific version by pushing a matching tag, for example:
-
-```sh
-git tag v7.35.1
-git push origin v7.35.1
-```
-
-The workflow builds the package on Ubuntu, checks that the package matches the
-upstream version, creates a SHA-256 checksum, and publishes both files as a
-GitHub Release. The installer and generated package are not committed to Git.
-
-## What this experiment can and cannot establish
-
-If the repacked client starts, it should use the client code and SQLite-backed
-record cache extracted from the official app. This may improve repeat page
-navigation. It does not make Notion's servers local: initial sign-in, uncached
-pages, and fresh data still require network access. Compare a cold start and a
-repeat visit in the same workspace before drawing conclusions.
-
-The upstream repack recipe and Notion releases may change. The script checks
-for the expected installer archive and patch targets, and stops if those
-assumptions no longer hold.
+The Notion application remains proprietary. The repository contains only packaging scripts and metadata; GitHub Actions fetches the official Linux payload during each build and attaches the resulting Debian package and checksum to the release.

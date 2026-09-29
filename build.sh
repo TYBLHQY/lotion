@@ -3,258 +3,255 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
-EXTRACT_DIR="$BUILD_DIR/extracted"
-APP_DIR="$BUILD_DIR/app"
-INSTALLER="$BUILD_DIR/notion-windows-installer.exe"
-LOCAL_INSTALLER="$BUILD_DIR/inputs/notion-windows-installer.exe"
+STAGE="$BUILD_DIR/package-root"
+REF_FILE="$BUILD_DIR/notion.flatpakref"
+APP_ID="${NOTION_APP_ID:-com.notion.app.desktop.notion}"
+APP_REF_URL="${NOTION_FLATPAK_REF_URL:-https://app.linux-packages.notion.com/notion.flatpakref}"
 
-for required_command in 7z node npm file dpkg-deb; do
+for required_command in curl flatpak dpkg-deb desktop-file-validate python3 git; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     printf 'Missing required command: %s\n' "$required_command" >&2
     exit 1
   fi
 done
 
-rm -rf "$EXTRACT_DIR" "$BUILD_DIR/payload" "$APP_DIR"
-mkdir -p "$EXTRACT_DIR"
-
-if [[ -n "${NOTION_INSTALLER_PATH:-}" ]]; then
-  if [[ ! -f "$NOTION_INSTALLER_PATH" ]]; then
-    printf 'NOTION_INSTALLER_PATH does not point to a file.\n' >&2
-    exit 1
-  fi
-  cp -- "$NOTION_INSTALLER_PATH" "$INSTALLER"
-elif [[ -f "$LOCAL_INSTALLER" ]]; then
-  printf 'Using the project-local Notion installer: %s\n' "$LOCAL_INSTALLER"
-  cp -- "$LOCAL_INSTALLER" "$INSTALLER"
-else
-  if ! command -v curl >/dev/null 2>&1; then
-    printf 'Missing required command for downloading the installer: curl\n' >&2
-    exit 1
-  fi
-  printf 'Downloading the official Notion Windows installer...\n'
-  curl --fail --location --retry 3 \
-    'https://www.notion.so/desktop/windows/download' \
-    --output "$INSTALLER"
-fi
-
-printf 'Extracting the Electron payload...\n'
-7z x -y "$INSTALLER" '$PLUGINSDIR/app-64.7z' "-o$EXTRACT_DIR" >/dev/null
-PAYLOAD_ARCHIVE="$(find "$EXTRACT_DIR" -type f -name 'app-64.7z' -print -quit)"
-if [[ -z "$PAYLOAD_ARCHIVE" ]]; then
-  printf 'Could not find $PLUGINSDIR/app-64.7z in the installer.\n' >&2
+rm -rf "$BUILD_DIR/package-root" "$PROJECT_ROOT/dist"
+mkdir -p "$BUILD_DIR" "$PROJECT_ROOT/dist"
+printf 'Downloading Notion’s official Flatpak reference...\n'
+curl --fail --location --retry 3 "$APP_REF_URL" --output "$REF_FILE"
+if ! grep -Fxq "Name=$APP_ID" "$REF_FILE"; then
+  printf 'The Flatpak reference did not contain the expected application ID (%s).\n' "$APP_ID" >&2
   exit 1
 fi
 
-mkdir -p "$BUILD_DIR/payload"
-7z x -y "$PAYLOAD_ARCHIVE" \
-  'resources/app.asar' \
-  'resources/app.asar.unpacked/*' \
-  'resources/icon-production.png' \
-  "-o$BUILD_DIR/payload" >/dev/null
-ASAR_FILE="$BUILD_DIR/payload/resources/app.asar"
-if [[ ! -f "$ASAR_FILE" ]]; then
-  printf 'Could not find resources/app.asar in the Windows payload.\n' >&2
+printf 'Installing the official app and its runtime into a temporary user installation...\n'
+flatpak install --user --noninteractive --or-update --from "$REF_FILE"
+APP_LOCATION="$(flatpak info --user --show-location "$APP_ID")"
+RUNTIME_REF="$(flatpak info --user --show-runtime "$APP_ID")"
+if [[ -z "$RUNTIME_REF" || "$RUNTIME_REF" == "-" ]]; then
+  printf 'The official app does not report a Flatpak runtime; refusing to make an incomplete package.\n' >&2
+  exit 1
+fi
+RUNTIME_LOCATION="$(flatpak info --user --show-location "$RUNTIME_REF")"
+APP_FILES="$APP_LOCATION/files"
+RUNTIME_FILES="$RUNTIME_LOCATION/files"
+if [[ ! -d "$APP_FILES" || ! -d "$RUNTIME_FILES" ]]; then
+  printf 'Could not find the installed app or runtime payload.\n' >&2
   exit 1
 fi
 
-NPM_CACHE_DIR="$(npm config get cache)"
-ASAR_BIN="$(find "$NPM_CACHE_DIR/_npx" -type f -path '*/node_modules/@electron/asar/bin/asar.js' -print -quit 2>/dev/null || true)"
-if [[ -n "$ASAR_BIN" ]]; then
-  node "$ASAR_BIN" extract "$ASAR_FILE" "$APP_DIR"
-else
-  npx --yes @electron/asar extract "$ASAR_FILE" "$APP_DIR"
-fi
+APP_METADATA="$BUILD_DIR/app-metadata.ini"
+flatpak info --user --show-metadata "$APP_ID" > "$APP_METADATA"
+APP_COMMAND="$(python3 - "$APP_METADATA" <<'PY'
+import configparser
+import sys
 
-ELECTRON_VERSION="$(node -p "require('$APP_DIR/package.json').devDependencies.electron")"
-if [[ -z "$ELECTRON_VERSION" || "$ELECTRON_VERSION" == "undefined" ]]; then
-  printf 'Could not determine the Electron version from the extracted app.\n' >&2
+metadata = configparser.ConfigParser(interpolation=None)
+metadata.read(sys.argv[1])
+print(metadata.get("Application", "command", fallback=""))
+PY
+)"
+if [[ -z "$APP_COMMAND" || "$APP_COMMAND" == */* || "$APP_COMMAND" == *[[:space:]]* ]]; then
+  printf 'Could not determine a safe executable name from the app metadata: %s\n' "$APP_COMMAND" >&2
+  exit 1
+fi
+APP_EXECUTABLE="$APP_FILES/bin/$APP_COMMAND"
+if [[ ! -x "$APP_EXECUTABLE" ]]; then
+  printf 'The app command is missing or not executable: %s\n' "$APP_EXECUTABLE" >&2
   exit 1
 fi
 
-SQLITE_MODULE="$APP_DIR/node_modules/better-sqlite3"
-if [[ ! -d "$SQLITE_MODULE" ]]; then
-  printf 'The extracted app does not contain better-sqlite3 at the expected path.\n' >&2
+APP_VERSION="$(flatpak info --user "$APP_ID" | sed -n 's/^Version:[[:space:]]*//p' | head -n 1)"
+if [[ -z "$APP_VERSION" ]]; then
+  APP_VERSION="$(python3 - "$APP_FILES" <<'PY'
+import glob
+import sys
+import xml.etree.ElementTree as ET
+
+paths = glob.glob(sys.argv[1] + "/share/metainfo/*.metainfo.xml")
+paths += glob.glob(sys.argv[1] + "/share/appdata/*.appdata.xml")
+for path in paths:
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        continue
+    for element in root.iter():
+        if element.tag.split("}")[-1] == "release":
+            version = element.get("version", "")
+            if version:
+                print(version)
+                raise SystemExit(0)
+PY
+)"
+fi
+if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+)*([+~-][A-Za-z0-9.+~:-]+)?$ ]]; then
+  printf 'Could not determine a Debian-safe upstream application version: %s\n' "$APP_VERSION" >&2
   exit 1
 fi
 
-SQLITE_VERSION="$(node -p "require('$SQLITE_MODULE/package.json').version")"
-SQLITE_SOURCE_DIR="$BUILD_DIR/better-sqlite3-source"
-printf 'Fetching better-sqlite3 %s sources for Electron %s...\n' "$SQLITE_VERSION" "$ELECTRON_VERSION"
-npm pack "better-sqlite3@$SQLITE_VERSION" --pack-destination "$BUILD_DIR"
-SQLITE_TARBALL="$(find "$BUILD_DIR" -maxdepth 1 -type f -name "better-sqlite3-$SQLITE_VERSION.tgz" -print -quit)"
-if [[ -z "$SQLITE_TARBALL" ]]; then
-  printf 'Could not download the matching better-sqlite3 source package.\n' >&2
+APP_COMMIT="$(flatpak info --user --show-commit "$APP_ID")"
+if [[ ! "$APP_COMMIT" =~ ^[0-9a-f]{64}$ ]]; then
+  printf 'Unexpected Flatpak commit checksum: %s\n' "$APP_COMMIT" >&2
   exit 1
 fi
-rm -rf "$SQLITE_SOURCE_DIR"
-mkdir -p "$SQLITE_SOURCE_DIR"
-tar -xzf "$SQLITE_TARBALL" -C "$SQLITE_SOURCE_DIR" --strip-components=1
-cp -a "$SQLITE_SOURCE_DIR"/. "$SQLITE_MODULE"/
+SHORT_COMMIT="${APP_COMMIT:0:12}"
+SOURCE_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --verify HEAD)"
+SOURCE_SHORT="${SOURCE_COMMIT:0:12}"
+DEB_VERSION="${APP_VERSION}+flatpak.${SHORT_COMMIT}.pkg.${SOURCE_SHORT}"
+ARCH="$(dpkg --print-architecture)"
 
-(
-  cd "$SQLITE_MODULE"
-  npx --yes node-gyp rebuild \
-    --force_build=1 \
-    --target="$ELECTRON_VERSION" \
-    --arch=x64 \
-    --dist-url=https://electronjs.org/headers
+printf 'Preparing Notion %s from Flatpak commit %s for %s...\n' "$APP_VERSION" "$SHORT_COMMIT" "$ARCH"
+install -d "$STAGE/opt/Notion/app" "$STAGE/opt/Notion/runtime" \
+  "$STAGE/usr/bin" "$STAGE/usr/share/applications" "$STAGE/usr/share/icons/hicolor" \
+  "$STAGE/usr/share/doc/notion-desktop" "$STAGE/DEBIAN"
+cp -a "$APP_FILES/." "$STAGE/opt/Notion/app/"
+cp -a "$RUNTIME_FILES/." "$STAGE/opt/Notion/runtime/"
+cp "$APP_METADATA" "$STAGE/usr/share/doc/notion-desktop/flatpak-metadata.ini"
+printf '%s\n' "$APP_COMMIT" > "$STAGE/usr/share/doc/notion-desktop/flatpak-commit"
+
+cat > "$STAGE/opt/Notion/notion-launcher" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=/opt/Notion
+APP="$ROOT/app"
+RUNTIME="$ROOT/runtime"
+
+# Keep the Flatpak runtime's libraries available without installing Flatpak.
+LIB_DIRS=()
+while IFS= read -r dir; do LIB_DIRS+=("$dir"); done < <(
+  find "$APP" "$RUNTIME/usr" -type f -name '*.so*' -printf '%h\n' 2>/dev/null | sort -u
 )
+joined=""
+if ((${#LIB_DIRS[@]})); then
+  joined="$(IFS=:; printf '%s' "${LIB_DIRS[*]}")"
+  export LD_LIBRARY_PATH="$joined${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+export PATH="$APP/bin:$RUNTIME/usr/bin:$PATH"
+export XDG_DATA_DIRS="$APP/share:$RUNTIME/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export GIO_EXTRA_MODULES="$RUNTIME/usr/lib/gio/modules${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
 
-SQLITE_BINARY="$SQLITE_MODULE/build/Release/better_sqlite3.node"
-if [[ ! -f "$SQLITE_BINARY" ]] || file "$SQLITE_BINARY" | grep -qi 'PE32'; then
-  printf 'better-sqlite3 is still a Windows binary; Linux rebuild did not produce a usable module.\n' >&2
-  exit 1
+config_home="${XDG_CONFIG_HOME:-${HOME:?HOME must be set}/.config}"
+user_data="$config_home/Notion"
+flatpak_profile="${HOME:?HOME must be set}/.var/app/@APP_ID@/config/Notion"
+# Preserve an existing official Flatpak profile when switching to the deb.
+if [[ ! -e "$user_data" && -d "$flatpak_profile" ]]; then
+  mkdir -p "$config_home"
+  cp -a "$flatpak_profile" "$user_data"
 fi
 
-MAIN_BUNDLE="$APP_DIR/.webpack/main/index.js"
-if [[ ! -f "$MAIN_BUNDLE" ]]; then
-  printf 'Could not find the expected Electron main bundle: %s\n' "$MAIN_BUNDLE" >&2
-  exit 1
-fi
-
-printf 'Applying Linux compatibility patches...\n'
-node - "$MAIN_BUNDLE" <<'NODE'
-const fs = require('node:fs')
-const bundlePath = process.argv[2]
-let bundle = fs.readFileSync(bundlePath, 'utf8')
-const replacements = [
-  [
-    'return!(!n||!r)||"win32"===process.platform',
-    'return!(!n||!r)||"linux"===process.platform',
-  ],
-  [
-    'n="win32"===process.platform?function(e,t){const{isOpenAtLoginEnabled:n,isQuickSearchEnabled:r,isHideLastWindowOnCloseEnabled:o}=t;',
-    'n="linux"===process.platform?function(e,t){const{isOpenAtLoginEnabled:n,isQuickSearchEnabled:r,isHideLastWindowOnCloseEnabled:o}=t;',
-  ],
-  [
-    'o="win32"===process.platform?[{type:"separator"},(0,p.buildTroubleshootingMenu)(e,s.setSystemMenu),{type:"separator"}]:[]',
-    'o="linux"===process.platform?[{type:"separator"},(0,p.buildTroubleshootingMenu)(e,s.setSystemMenu),{type:"separator"}]:[]',
-  ],
-]
-for (const [before, after] of replacements) {
-  if (bundle.split(before).length !== 2) {
-    console.error(`Expected exactly one Linux patch target; found ${bundle.split(before).length - 1}.`)
-    process.exit(1)
-  }
-  bundle = bundle.replace(before, after)
-}
-const windowsTrayBinding = 'this.tray=new l.Tray(this.getIcon()),this.tray.on("click",()=>{this.onClick()}),this.tray.on("right-click",()=>this.onRightClick()),this.tray.setToolTip(l.app.getName())'
-const linuxTrayBinding = 'this.tray=new l.Tray(this.getIcon()),"linux"===process.platform?this.tray.setContextMenu(this.trayMenu):this.tray.on("right-click",()=>this.onRightClick()),this.tray.on("click",()=>{this.onClick()}),this.tray.setToolTip(l.app.getName())'
-if (bundle.split(windowsTrayBinding).length !== 2) {
-  console.error('Expected tray event binding was not found; refusing to patch an unknown app build.')
-  process.exit(1)
-}
-bundle = bundle.replace(windowsTrayBinding, linuxTrayBinding)
-fs.writeFileSync(bundlePath, bundle)
-NODE
-
-INSTALLER_ICON="$BUILD_DIR/payload/resources/icon-production.png"
-if [[ ! -f "$INSTALLER_ICON" ]]; then
-  printf 'Could not find resources/icon-production.png in the Windows payload.\n' >&2
-  exit 1
-fi
-install -m 0644 "$INSTALLER_ICON" "$APP_DIR/icon.png"
-
-printf 'Building a Debian package...\n'
-node - "$APP_DIR/package.json" <<'NODE'
-const fs = require('node:fs')
-const packagePath = process.argv[2]
-const appPackage = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
-appPackage.author = { name: 'Local personal build', email: 'local-build@example.invalid' }
-appPackage.homepage = 'https://www.notion.com'
-appPackage.desktopName = 'local.personal.notion'
-appPackage.build = {
-  ...appPackage.build,
-  appId: 'local.personal.notion',
-  productName: 'Notion',
-  linux: {
-    ...appPackage.build?.linux,
-    category: 'Utility',
-    maintainer: 'Local personal build <local-build@example.invalid>',
-    syncDesktopName: true,
-  },
-}
-fs.writeFileSync(packagePath, `${JSON.stringify(appPackage, null, 2)}\n`)
-NODE
-APP_VERSION="$(node -p "require('$APP_DIR/package.json').version")"
-APP_PROTOCOL="$(node -p "require('$APP_DIR/config.json').protocol")"
-if [[ ! "$APP_PROTOCOL" =~ ^[a-z][a-z0-9+.-]*$ ]]; then
-  printf 'Unexpected desktop URL protocol: %s\n' "$APP_PROTOCOL" >&2
-  exit 1
-fi
-cd "$APP_DIR"
-npx --yes electron-builder --linux deb --config.npmRebuild=false --publish never
-
-mkdir -p "$PROJECT_ROOT/dist"
-rm -f "$PROJECT_ROOT/dist"/*.deb
-find "$APP_DIR/dist" -maxdepth 1 -type f -name '*.deb' -exec cp -f {} "$PROJECT_ROOT/dist/" \;
-if ! find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print -quit | grep -q .; then
-  printf 'electron-builder finished but did not produce a .deb package.\n' >&2
-  exit 1
-fi
-
-printf 'Making the desktop icon path explicit...\n'
-while IFS= read -r -d '' DEB_PACKAGE; do
-  PACKAGE_STAGING="$BUILD_DIR/deb-staging"
-  rm -rf "$PACKAGE_STAGING"
-  dpkg-deb --raw-extract "$DEB_PACKAGE" "$PACKAGE_STAGING"
-  install -m 0644 "$INSTALLER_ICON" "$PACKAGE_STAGING/opt/Notion/icon.png"
-  install -m 0644 "$INSTALLER_ICON" "$PACKAGE_STAGING/opt/Notion/resources/aboutIcon.png"
-  install -m 0755 "$PROJECT_ROOT/launch-notion.sh" "$PACKAGE_STAGING/opt/Notion/notion-launcher"
-  DESKTOP_FILE="$(find "$PACKAGE_STAGING/usr/share/applications" -maxdepth 1 -type f -name '*.desktop' -print -quit)"
-  if [[ ! -f "$DESKTOP_FILE" ]]; then
-    printf 'Could not find the generated Notion desktop entry.\n' >&2
-    exit 1
+executable="$APP/bin/@APP_COMMAND@"
+if [[ "$(od -An -tx1 -N4 "$executable" | tr -d ' \n')" == 7f454c46 ]]; then
+  loader=""
+  case "$(uname -m)" in
+    x86_64) loader="$(find -L "$RUNTIME/usr/lib" -type f -name 'ld-linux-x86-64.so.2' -print -quit 2>/dev/null || true)" ;;
+    aarch64) loader="$(find -L "$RUNTIME/usr/lib" -type f -name 'ld-linux-aarch64.so.1' -print -quit 2>/dev/null || true)" ;;
+  esac
+  if [[ -n "$loader" ]]; then
+    exec "$loader" --library-path "$joined" "$executable" --user-data-dir="$user_data" "$@"
   fi
-  sed --in-place 's|^Icon=.*$|Icon=/opt/Notion/icon.png|' "$DESKTOP_FILE"
-  sed --in-place 's|^Exec=.*$|Exec=/opt/Notion/notion-launcher %U|' "$DESKTOP_FILE"
-  if ! grep -Fq "x-scheme-handler/$APP_PROTOCOL;" "$DESKTOP_FILE"; then
-    if grep -q '^MimeType=' "$DESKTOP_FILE"; then
-      sed --in-place "/^MimeType=/s|\$|x-scheme-handler/$APP_PROTOCOL;|" "$DESKTOP_FILE"
-    else
-      printf 'MimeType=x-scheme-handler/%s;\n' "$APP_PROTOCOL" >> "$DESKTOP_FILE"
-    fi
-  fi
-  if ! grep -Fxq "Version: $APP_VERSION" "$PACKAGE_STAGING/DEBIAN/control"; then
-    printf 'Could not find the expected upstream package version in the control file.\n' >&2
-    exit 1
-  fi
-  sed --in-place "s/^Version: $APP_VERSION$/Version: $APP_VERSION+local3/" "$PACKAGE_STAGING/DEBIAN/control"
-  POST_INSTALL_SCRIPT="$PACKAGE_STAGING/DEBIAN/postinst"
-  sed --in-place \
-    -e '/^if hash update-mime-database /,/^fi$/d' \
-    -e '/^if hash update-desktop-database /,/^fi$/d' \
-    "$POST_INSTALL_SCRIPT"
-  if grep -Eq 'update-(mime|desktop)-database' "$POST_INSTALL_SCRIPT"; then
-    printf 'The generated post-install script still rebuilds global desktop caches.\n' >&2
-    exit 1
-  fi
-  cat >> "$POST_INSTALL_SCRIPT" <<'SH'
+fi
+exec "$executable" --user-data-dir="$user_data" "$@"
+SH
+sed -i \
+  -e "s|@APP_ID@|$APP_ID|g" \
+  -e "s|@APP_COMMAND@|$APP_COMMAND|g" \
+  "$STAGE/opt/Notion/notion-launcher"
+chmod 0755 "$STAGE/opt/Notion/notion-launcher"
 
+# Preserve the upstream desktop metadata and icon where possible.
+SOURCE_DESKTOP="$(find "$APP_FILES/share/applications" -maxdepth 1 -type f -name '*.desktop' -print -quit 2>/dev/null || true)"
+if [[ -n "$SOURCE_DESKTOP" ]]; then
+  cp "$SOURCE_DESKTOP" "$STAGE/usr/share/applications/notion.desktop"
+  sed -i -E \
+    -e 's|^Exec=.*$|Exec=/opt/Notion/notion-launcher %U|' \
+    -e 's|^TryExec=.*$|TryExec=/opt/Notion/notion-launcher|' \
+    -e 's|^Icon=.*$|Icon=notion|' \
+    "$STAGE/usr/share/applications/notion.desktop"
+else
+  cat > "$STAGE/usr/share/applications/notion.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Notion
+Comment=The connected workspace
+Exec=/opt/Notion/notion-launcher %U
+TryExec=/opt/Notion/notion-launcher
+Icon=notion
+Terminal=false
+Categories=Office;
+MimeType=x-scheme-handler/notion;
+DESKTOP
+fi
+if ! grep -Fq 'x-scheme-handler/notion;' "$STAGE/usr/share/applications/notion.desktop"; then
+  if grep -q '^MimeType=' "$STAGE/usr/share/applications/notion.desktop"; then
+    sed -i '/^MimeType=/s|$|x-scheme-handler/notion;|' "$STAGE/usr/share/applications/notion.desktop"
+  else
+    printf 'MimeType=x-scheme-handler/notion;\n' >> "$STAGE/usr/share/applications/notion.desktop"
+  fi
+fi
+
+ICON_SOURCE="$(find "$APP_FILES/share/icons" -type f \( -iname '*.png' -o -iname '*.svg' \) -path '*/apps/*' -print -quit 2>/dev/null || true)"
+if [[ -n "$ICON_SOURCE" ]]; then
+  ICON_REL="${ICON_SOURCE#"$APP_FILES/share/icons/"}"
+  ICON_DIR="$(dirname "$ICON_REL")"
+  ICON_EXT="${ICON_SOURCE##*.}"
+  install -D -m 0644 "$ICON_SOURCE" "$STAGE/usr/share/icons/$ICON_DIR/notion.$ICON_EXT"
+else
+  printf 'The official app payload did not contain an application icon.\n' >&2
+  exit 1
+fi
+
+cat > "$STAGE/DEBIAN/control" <<EOF
+Package: notion-desktop
+Version: $DEB_VERSION
+Section: net
+Priority: optional
+Architecture: $ARCH
+Maintainer: TYBLHQY <noreply@example.invalid>
+Depends: libc6, libstdc++6, libgcc-s1, libx11-6, libx11-xcb1, libxcb1, libxext6, libxfixes3, libxrender1, libxcomposite1, libxdamage1, libxrandr2, libxkbcommon0, libnss3, libasound2t64 | libasound2, libgbm1, libdrm2
+Description: Notion desktop for Linux, packaged from Notion's official Flatpak
+ This Debian package includes the official Notion Linux application and its
+ Flatpak runtime libraries. Flatpak itself is not required at runtime.
+EOF
+
+cat > "$STAGE/DEBIAN/postinst" <<'SH'
+#!/bin/sh
+set -e
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database /usr/share/applications || true
 fi
+exit 0
 SH
-  cat >> "$PACKAGE_STAGING/DEBIAN/postrm" <<'SH'
-
+cat > "$STAGE/DEBIAN/postrm" <<'SH'
+#!/bin/sh
+set -e
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database /usr/share/applications || true
 fi
+exit 0
 SH
-  (
-    cd "$PACKAGE_STAGING"
-    find . -type f ! -path './DEBIAN/*' -print0 \
-      | sort -z \
-      | xargs -0 md5sum > DEBIAN/md5sums
-  )
-  PATCHED_PACKAGE="$DEB_PACKAGE.patched"
-  dpkg-deb --build --root-owner-group "$PACKAGE_STAGING" "$PATCHED_PACKAGE" >/dev/null
-  mv -f "$PATCHED_PACKAGE" "$DEB_PACKAGE"
-done < <(find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print0)
+chmod 0755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/postrm"
+desktop-file-validate "$STAGE/usr/share/applications/notion.desktop"
 
-BUILT_PACKAGE="$(find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print -quit)"
-FINAL_PACKAGE="$PROJECT_ROOT/dist/Notion_${APP_VERSION}+local3_amd64.deb"
-mv -f "$BUILT_PACKAGE" "$FINAL_PACKAGE"
+PACKAGE="$PROJECT_ROOT/dist/notion-desktop_${DEB_VERSION}_${ARCH}.deb"
+dpkg-deb --build --root-owner-group "$STAGE" "$PACKAGE" >/dev/null
+dpkg-deb --info "$PACKAGE" >/dev/null
+python3 - "$PROJECT_ROOT/dist/build-metadata.json" "$APP_VERSION" "$APP_COMMIT" "$SHORT_COMMIT" "$SOURCE_COMMIT" "$SOURCE_SHORT" "$PACKAGE" <<'PY'
+import json
+import os
+import sys
 
-printf 'Build complete. Debian package(s) are in %s\n' "$PROJECT_ROOT/dist"
+path, version, commit, short_commit, source_commit, source_short, package = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump({
+        "version": version,
+        "commit": commit,
+        "short_commit": short_commit,
+        "source_commit": source_commit,
+        "source_short": source_short,
+        "tag": f"v{version}-flatpak-{short_commit}-pkg-{source_short}",
+        "package": os.path.basename(package),
+    }, stream, indent=2)
+    stream.write("\n")
+PY
+printf 'Build complete: %s\n' "$PACKAGE"
+printf 'Upstream version: %s\nFlatpak commit: %s\n' "$APP_VERSION" "$APP_COMMIT"

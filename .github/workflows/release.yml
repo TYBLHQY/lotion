@@ -1,9 +1,8 @@
-name: Build and publish Notion Linux package
+name: Build and publish Notion for Linux
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main, lotion-flatpak-deb]
   schedule:
     - cron: '17 9 * * 1'
   workflow_dispatch:
@@ -12,136 +11,130 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    if: ${{ github.event_name != 'push' || !contains(github.ref_name, '+local') }}
-    runs-on: ubuntu-22.04
+  build-test-release:
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         uses: actions/checkout@v5
 
-      - name: Install build dependencies
+      - name: Install build and test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential curl file p7zip-full python3 dpkg-dev
+            dbus-x11 desktop-file-utils flatpak file xvfb xauth
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-
-      - name: Check upstream version
-        id: upstream
-        if: github.event_name != 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Prepare Flatpak user environment
         shell: bash
         run: |
           set -euo pipefail
-          probe_dir="$RUNNER_TEMP/notion-upstream"
-          installer="$GITHUB_WORKSPACE/build/inputs/notion-windows-installer.exe"
-          mkdir -p "$probe_dir/installer" "$probe_dir/payload" "$(dirname "$installer")"
+          runtime_dir="$RUNNER_TEMP/flatpak-runtime"
+          mkdir -p "$runtime_dir"
+          chmod 700 "$runtime_dir"
+          echo "XDG_RUNTIME_DIR=$runtime_dir" >> "$GITHUB_ENV"
 
-          curl --fail --location --retry 3 \
-            'https://www.notion.so/desktop/windows/download' \
-            --output "$installer"
-          7z x -y "$installer" '$PLUGINSDIR/app-64.7z' \
-            "-o$probe_dir/installer" >/dev/null
-          payload_archive="$(find "$probe_dir/installer" -type f -name 'app-64.7z' -print -quit)"
-          if [[ -z "$payload_archive" ]]; then
-            echo 'Could not find the Notion application archive in the installer.' >&2
-            exit 1
-          fi
-          7z x -y "$payload_archive" 'resources/app.asar' \
-            "-o$probe_dir/payload" >/dev/null
-          asar_file="$probe_dir/payload/resources/app.asar"
-          if [[ ! -f "$asar_file" ]]; then
-            echo 'Could not find resources/app.asar in the installer.' >&2
-            exit 1
-          fi
-          (
-            cd "$probe_dir"
-            npx --yes @electron/asar extract-file "$asar_file" package.json
-          )
-          upstream_version="$(node -p "require('$probe_dir/package.json').version")"
-          if [[ ! "$upstream_version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
-            echo "Unexpected Notion version: $upstream_version" >&2
-            exit 1
-          fi
-
-          released_versions="$(gh release list --repo "$GITHUB_REPOSITORY" \
-            --limit 100 --json tagName --jq '.[].tagName' \
-            | sed -n 's/^v//p' | grep -E '^[0-9]+(\.[0-9]+)*$' || true)"
-          latest_released="$(printf '%s\n' "$released_versions" | sort -V | tail -n 1)"
-          if [[ -n "$latest_released" ]] && \
-            [[ "$(printf '%s\n%s\n' "$latest_released" "$upstream_version" | sort -V | tail -n 1)" == "$latest_released" ]]; then
-            echo "Notion $upstream_version is not newer than the latest release v$latest_released; skipping build."
-            echo 'should_build=false' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "New Notion version found: $upstream_version"
-          echo "tag=v$upstream_version" >> "$GITHUB_OUTPUT"
-          echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
-          echo 'should_build=true' >> "$GITHUB_OUTPUT"
-
-      - name: Select tag for pushed release
-        id: tag
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "upstream_version=${tag#v}" >> "$GITHUB_OUTPUT"
-          echo 'should_build=true' >> "$GITHUB_OUTPUT"
-
-      - name: Build Debian package
-        if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
+      - name: Build the Debian package from Notion's official Linux Flatpak
         run: ./build.sh
 
-      - name: Check package version and create checksum
-        id: package
-        if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
+      - name: Install and test the Debian package
+        id: test
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          packages=(dist/*.deb)
-          if [[ ${#packages[@]} -ne 1 ]]; then
-            echo "Expected exactly one Debian package, found ${#packages[@]}." >&2
+          package="$(find dist -maxdepth 1 -type f -name 'notion-desktop_*.deb' -print -quit)"
+          test -n "$package"
+          dpkg-deb --field "$package" Package | grep -Fxq notion-desktop
+          sudo apt-get install --yes --no-install-recommends "./$package"
+          test -x /opt/Notion/notion-launcher
+          test -f /usr/share/applications/notion.desktop
+          grep -Fq 'x-scheme-handler/notion;' /usr/share/applications/notion.desktop
+
+          smoke_home="$RUNNER_TEMP/notion-smoke"
+          mkdir -p "$smoke_home"
+          chmod 700 "$smoke_home"
+          timeout --signal=TERM 25s xvfb-run --auto-servernum \
+            dbus-run-session -- env HOME="$smoke_home" \
+            XDG_CONFIG_HOME="$smoke_home/.config" \
+            /opt/Notion/notion-launcher --disable-gpu --no-sandbox \
+            > "$RUNNER_TEMP/notion-smoke.log" 2>&1 &
+          smoke_pid=$!
+          started=false
+          for _ in $(seq 1 15); do
+            if pgrep -u "$(id -u)" -f '/opt/Notion/app/bin/' >/dev/null; then
+              started=true
+              break
+            fi
+            if ! kill -0 "$smoke_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if [[ "$started" != true ]]; then
+            set +e
+            wait "$smoke_pid"
+            status=$?
+            set -e
+            cat "$RUNNER_TEMP/notion-smoke.log"
+            echo "Notion did not open within 15 seconds (status $status)." >&2
             exit 1
           fi
+          kill "$smoke_pid" 2>/dev/null || true
+          wait "$smoke_pid" 2>/dev/null || true
+          echo "package=$package" >> "$GITHUB_OUTPUT"
 
-          package="${packages[0]}"
-          version="$(dpkg-deb --field "$package" Version)"
-          upstream_version="${version%+local3}"
-          expected_version="${{ steps.upstream.outputs.upstream_version || steps.tag.outputs.upstream_version }}"
-          if [[ "$upstream_version" != "$expected_version" ]]; then
-            echo "Expected Notion $expected_version but built package version is $version." >&2
-            exit 1
-          fi
-
-          sha256sum "$package" > "$package.sha256"
-          echo "path=$package" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
-
-      - name: Publish GitHub Release
-        if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
+      - name: Check whether this Flatpak commit is already released
+        id: release_check
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
-          cat > release-notes.md <<EOF
-          Unofficial Linux repack of Notion ${{ steps.package.outputs.upstream_version }} for personal use.
+          commit="$(python3 -c 'import json; print(json.load(open("dist/build-metadata.json"))["commit"])')"
+          source_commit="$(python3 -c 'import json; print(json.load(open("dist/build-metadata.json"))["source_commit"])')"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          if python3 - "$RUNNER_TEMP/releases.json" "$commit" "$source_commit" <<'PY'
+          import json
+          import sys
+          releases = json.load(open(sys.argv[1], encoding="utf-8"))
+          app_commit, source_commit = sys.argv[2:]
+          found = any(
+              f"Notion Flatpak commit: {app_commit}" in (release.get("body") or "")
+              and f"Lotion packaging commit: {source_commit}" in (release.get("body") or "")
+              for release in releases
+          )
+          raise SystemExit(0 if found else 1)
+          PY
+          then
+            echo "This app and packaging commit pair is already released; skipping publication."
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          fi
 
-          This package is built from Notion's official Windows installer and is not affiliated with or endorsed by Notion.
+      - name: Create checksum
+        if: steps.release_check.outputs.publish == 'true'
+        run: sha256sum "dist/${{ steps.test.outputs.package }}" > "dist/${{ steps.test.outputs.package }}.sha256"
+
+      - name: Publish GitHub release
+        if: steps.release_check.outputs.publish == 'true' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata=dist/build-metadata.json
+          version="$(python3 -c 'import json; print(json.load(open("dist/build-metadata.json"))["version"])')"
+          commit="$(python3 -c 'import json; print(json.load(open("dist/build-metadata.json"))["commit"])')"
+          source_commit="$(python3 -c 'import json; print(json.load(open("dist/build-metadata.json"))["source_commit"])')"
+          tag="$(python3 -c 'import json; print(json.load(open("dist/build-metadata.json"))["tag"])')"
+          package="dist/$(python3 -c 'import json; print(json.load(open("dist/build-metadata.json"))["package"])')"
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Notion $version for Debian-based Linux systems, built from Notion's official Linux Flatpak payload.
+
+          Notion Flatpak commit: $commit
+          Lotion packaging commit: $source_commit
+
+          The Debian package includes the app and its runtime libraries, so Flatpak is not required to install or run it. The Notion application remains proprietary and this repack is an independent community packaging project.
           EOF
-
-          gh release create "${{ steps.upstream.outputs.tag || steps.tag.outputs.tag }}" \
-            "${{ steps.package.outputs.path }}" \
-            "${{ steps.package.outputs.path }}.sha256" \
+          gh release create "$tag" "$package" "$package.sha256" \
             --target "$GITHUB_SHA" \
-            --title "Notion ${{ steps.package.outputs.upstream_version }} for Linux" \
-            --notes-file release-notes.md
+            --title "Notion $version for Linux (DEB)" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
