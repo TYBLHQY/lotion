@@ -73,7 +73,7 @@ jobs:
           smoke_pid=$!
           started=false
           for _ in $(seq 1 15); do
-            if pgrep -u "$(id -u)" -f '/opt/Notion/app/bin/' >/dev/null; then
+            if pgrep -u "$(id -u)" -f '/opt/Notion/app/' >/dev/null; then
               started=true
               break
             fi

@@ -112,6 +112,7 @@ if [[ -z "$APP_VERSION" ]]; then
 import glob
 import json
 import os
+import struct
 import sys
 import xml.etree.ElementTree as ET
 
@@ -142,6 +143,47 @@ for directory, _, filenames in os.walk(root_dir):
     if "notion" in identity and package.get("version"):
         print(package["version"])
         raise SystemExit(0)
+for directory, _, filenames in os.walk(root_dir):
+    for filename in filenames:
+        if not filename.endswith(".asar"):
+            continue
+        path = os.path.join(directory, filename)
+        try:
+            with open(path, "rb") as archive:
+                prefix = archive.read(8)
+                if len(prefix) != 8:
+                    continue
+                header_size = struct.unpack_from("<I", prefix)[0]
+                if not 0 < header_size <= 64 * 1024 * 1024:
+                    continue
+                header_pickle = archive.read(header_size)
+                if len(header_pickle) < 8:
+                    continue
+                json_size = struct.unpack_from("<I", header_pickle)[0]
+                header = json.loads(header_pickle[4:4 + json_size])
+                files = header.get("files", {})
+                stack = [files]
+                package_entry = None
+                while stack:
+                    entries = stack.pop()
+                    for name, entry in entries.items():
+                        if name == "package.json" and "offset" in entry:
+                            package_entry = entry
+                            break
+                        if isinstance(entry.get("files"), dict):
+                            stack.append(entry["files"])
+                    if package_entry:
+                        break
+                if not package_entry:
+                    continue
+                archive.seek(8 + header_size + int(package_entry["offset"]))
+                package = json.loads(archive.read(int(package_entry["size"])))
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, struct.error):
+            continue
+        identity = " ".join(str(package.get(key, "")) for key in ("name", "productName")).lower()
+        if "notion" in identity and package.get("version"):
+            print(package["version"])
+            raise SystemExit(0)
 PY
 )"
 fi
