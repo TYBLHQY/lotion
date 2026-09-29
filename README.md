@@ -26,6 +26,6 @@ GitHub Actions builds and smoke-tests the `.deb` whenever `main` changes. A week
 
 ## Packaging notes
 
-The `.flatpakref` points to Notion's signed application repository and the Flathub runtime repository; it does not contain application source code. This project extracts the installed payload and bundles the application and runtime files into the Debian package. The build records the upstream application version and Flatpak commit in `dist/build-metadata.json` so each source commit can be identified and released reproducibly.
+The `.flatpakref` points to Notion's signed application repository and the Flathub runtime repository; it does not contain application source code. This project extracts the installed payload and bundles the application and runtime files into the Debian package. The build records the upstream application version and Flatpak commit in `dist/build-metadata.json`; when Notion's Flatpak omits a version, it uses the latest known desktop version and a UTC build timestamp to keep Debian upgrades ordered.
 
 The Notion application remains proprietary. The repository contains only packaging scripts and metadata; GitHub Actions fetches the official Linux payload during each build and attaches the resulting Debian package and checksum to the release.

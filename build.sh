@@ -65,11 +65,14 @@ APP_VERSION="$(flatpak info --user "$APP_ID" | sed -n 's/^Version:[[:space:]]*//
 if [[ -z "$APP_VERSION" ]]; then
   APP_VERSION="$(python3 - "$APP_FILES" <<'PY'
 import glob
+import json
+import os
 import sys
 import xml.etree.ElementTree as ET
 
-paths = glob.glob(sys.argv[1] + "/share/metainfo/*.metainfo.xml")
-paths += glob.glob(sys.argv[1] + "/share/appdata/*.appdata.xml")
+root_dir = sys.argv[1]
+paths = glob.glob(root_dir + "/**/*.metainfo.xml", recursive=True)
+paths += glob.glob(root_dir + "/**/*.appdata.xml", recursive=True)
 for path in paths:
     try:
         root = ET.parse(path).getroot()
@@ -81,8 +84,26 @@ for path in paths:
             if version:
                 print(version)
                 raise SystemExit(0)
+for directory, _, filenames in os.walk(root_dir):
+    if "package.json" not in filenames:
+        continue
+    path = os.path.join(directory, "package.json")
+    try:
+        with open(path, encoding="utf-8") as stream:
+            package = json.load(stream)
+    except (OSError, json.JSONDecodeError):
+        continue
+    identity = " ".join(str(package.get(key, "")) for key in ("name", "productName")).lower()
+    if "notion" in identity and package.get("version"):
+        print(package["version"])
+        raise SystemExit(0)
 PY
 )"
+fi
+VERSION_SOURCE="flatpak-metadata"
+if [[ -z "$APP_VERSION" ]]; then
+  APP_VERSION="${NOTION_VERSION_FALLBACK:-7.35.1}"
+  VERSION_SOURCE="latest-known-desktop-release"
 fi
 if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+)*([+~-][A-Za-z0-9.+~:-]+)?$ ]]; then
   printf 'Could not determine a Debian-safe upstream application version: %s\n' "$APP_VERSION" >&2
@@ -97,7 +118,8 @@ fi
 SHORT_COMMIT="${APP_COMMIT:0:12}"
 SOURCE_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --verify HEAD)"
 SOURCE_SHORT="${SOURCE_COMMIT:0:12}"
-DEB_VERSION="${APP_VERSION}+flatpak.${SHORT_COMMIT}.pkg.${SOURCE_SHORT}"
+BUILD_TIMESTAMP="$(date -u +%Y%m%d.%H%M%S)"
+DEB_VERSION="${APP_VERSION}+notion.${BUILD_TIMESTAMP}.flatpak.${SHORT_COMMIT}.pkg.${SOURCE_SHORT}"
 ARCH="$(dpkg --print-architecture)"
 
 printf 'Preparing Notion %s from Flatpak commit %s for %s...\n' "$APP_VERSION" "$SHORT_COMMIT" "$ARCH"
@@ -235,19 +257,21 @@ desktop-file-validate "$STAGE/usr/share/applications/notion.desktop"
 PACKAGE="$PROJECT_ROOT/dist/notion-desktop_${DEB_VERSION}_${ARCH}.deb"
 dpkg-deb --build --root-owner-group "$STAGE" "$PACKAGE" >/dev/null
 dpkg-deb --info "$PACKAGE" >/dev/null
-python3 - "$PROJECT_ROOT/dist/build-metadata.json" "$APP_VERSION" "$APP_COMMIT" "$SHORT_COMMIT" "$SOURCE_COMMIT" "$SOURCE_SHORT" "$PACKAGE" <<'PY'
+python3 - "$PROJECT_ROOT/dist/build-metadata.json" "$APP_VERSION" "$VERSION_SOURCE" "$APP_COMMIT" "$SHORT_COMMIT" "$SOURCE_COMMIT" "$SOURCE_SHORT" "$BUILD_TIMESTAMP" "$PACKAGE" <<'PY'
 import json
 import os
 import sys
 
-path, version, commit, short_commit, source_commit, source_short, package = sys.argv[1:]
+path, version, version_source, commit, short_commit, source_commit, source_short, build_timestamp, package = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as stream:
     json.dump({
         "version": version,
+        "version_source": version_source,
         "commit": commit,
         "short_commit": short_commit,
         "source_commit": source_commit,
         "source_short": source_short,
+        "build_timestamp": build_timestamp,
         "tag": f"v{version}-flatpak-{short_commit}-pkg-{source_short}",
         "package": os.path.basename(package),
     }, stream, indent=2)
