@@ -181,7 +181,7 @@ for directory, _, filenames in os.walk(root_dir):
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, struct.error):
             continue
         identity = " ".join(str(package.get(key, "")) for key in ("name", "productName")).lower()
-        if "notion" in identity and package.get("version"):
+        if ("notion" in identity or "notion" in path.lower()) and package.get("version"):
             print(package["version"])
             raise SystemExit(0)
 PY
@@ -189,7 +189,7 @@ PY
 fi
 VERSION_SOURCE="flatpak-metadata"
 if [[ -z "$APP_VERSION" ]]; then
-  APP_VERSION="${NOTION_VERSION_FALLBACK:-7.35.1}"
+  APP_VERSION="${NOTION_VERSION_FALLBACK:-7.36.0}"
   VERSION_SOURCE="latest-known-desktop-release"
 fi
 if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+)*([+~-][A-Za-z0-9.+~:-]+)?$ ]]; then
