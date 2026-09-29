@@ -86,11 +86,19 @@ for line in lines:
 PY
 )"
 if [[ -n "$WRAPPER_TARGET" ]]; then
-  if [[ "$WRAPPER_TARGET" != /app/* ]]; then
+  if [[ "$WRAPPER_TARGET" == /app/* ]]; then
+    APP_LAUNCH_RELATIVE="${WRAPPER_TARGET#/app/}"
+  elif [[ "$WRAPPER_TARGET" != */* && "$WRAPPER_TARGET" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+    APP_LAUNCH_EXECUTABLE="$(find "$APP_FILES" -type f -name "$WRAPPER_TARGET" -perm /111 -print -quit)"
+    if [[ -z "$APP_LAUNCH_EXECUTABLE" ]]; then
+      printf 'Could not find the Electron executable named by its wrapper: %s\n' "$WRAPPER_TARGET" >&2
+      exit 1
+    fi
+    APP_LAUNCH_RELATIVE="${APP_LAUNCH_EXECUTABLE#"$APP_FILES"/}"
+  else
     printf 'The Electron Flatpak wrapper points outside its app payload: %s\n' "$WRAPPER_TARGET" >&2
     exit 1
   fi
-  APP_LAUNCH_RELATIVE="${WRAPPER_TARGET#/app/}"
   APP_LAUNCH_EXECUTABLE="$APP_FILES/$APP_LAUNCH_RELATIVE"
   if [[ ! -x "$APP_LAUNCH_EXECUTABLE" ]]; then
     printf 'The Electron Flatpak wrapper target is missing or not executable: %s\n' "$APP_LAUNCH_EXECUTABLE" >&2
