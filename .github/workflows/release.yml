@@ -94,7 +94,7 @@ jobs:
           fi
           kill "$smoke_pid" 2>/dev/null || true
           wait "$smoke_pid" 2>/dev/null || true
-          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "package=${package#dist/}" >> "$GITHUB_OUTPUT"
 
       - name: Check whether this Flatpak commit is already released
         id: release_check
