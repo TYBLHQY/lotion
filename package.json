@@ -1,0 +1,15 @@
+{
+  "name": "lotion-build-tools",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.cjs"
+  },
+  "devDependencies": {
+    "@electron/asar": "4.3.1",
+    "acorn": "8.19.0",
+    "acorn-walk": "8.3.5",
+    "electron-builder": "26.15.3",
+    "node-gyp": "13.1.0"
+  }
+}

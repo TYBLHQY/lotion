@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   build-and-release:
-    if: ${{ github.event_name != 'push' || !contains(github.ref_name, '+local') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Check out source
@@ -23,12 +22,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential curl file p7zip-full python3 dpkg-dev
+            build-essential curl file p7zip-full python3 dpkg-dev \
+            xvfb xauth xdotool imagemagick libgtk-3-0 libnss3 libasound2 libgbm1
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: '24'
+          node-version: '24.19.0'
 
       - name: Check upstream version
         id: upstream
@@ -61,7 +61,7 @@ jobs:
           fi
           (
             cd "$probe_dir"
-            npx --yes @electron/asar extract-file "$asar_file" package.json
+            npx --yes @electron/asar@4.3.1 extract-file "$asar_file" package.json
           )
           upstream_version="$(node -p "require('$probe_dir/package.json').version")"
           if [[ ! "$upstream_version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
@@ -71,7 +71,7 @@ jobs:
 
           released_versions="$(gh release list --repo "$GITHUB_REPOSITORY" \
             --limit 100 --json tagName --jq '.[].tagName' \
-            | sed -n 's/^v//p' | grep -E '^[0-9]+(\.[0-9]+)*$' || true)"
+            | sed -n 's/^v//p' | sed 's/+local[0-9]*$//' | grep -E '^[0-9]+(\.[0-9]+)*$' || true)"
           latest_released="$(printf '%s\n' "$released_versions" | sort -V | tail -n 1)"
           if [[ -n "$latest_released" ]] && \
             [[ "$(printf '%s\n%s\n' "$latest_released" "$upstream_version" | sort -V | tail -n 1)" == "$latest_released" ]]; then
@@ -81,7 +81,7 @@ jobs:
           fi
 
           echo "New Notion version found: $upstream_version"
-          echo "tag=v$upstream_version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$upstream_version+local4" >> "$GITHUB_OUTPUT"
           echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
           echo 'should_build=true' >> "$GITHUB_OUTPUT"
 
@@ -92,13 +92,38 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v[0-9]+(\.[0-9]+)*(\+local4)?$ ]]; then
+            echo "Unsupported release tag: $tag" >&2
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "upstream_version=${tag#v}" >> "$GITHUB_OUTPUT"
+          version="${tag#v}"
+          echo "upstream_version=${version%+local4}" >> "$GITHUB_OUTPUT"
           echo 'should_build=true' >> "$GITHUB_OUTPUT"
 
       - name: Build Debian package
         if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
+        env:
+          NOTION_EXPECTED_VERSION: ${{ steps.upstream.outputs.upstream_version || steps.tag.outputs.upstream_version }}
         run: ./build.sh
+
+      - name: Verify Alt menu and SQLite in assembled app
+        if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
+        run: |
+          mkdir -p build/analysis
+          xvfb-run -a node scripts/verify-alt-menu.cjs build/deb-staging/opt/Notion/notion fixed
+
+      - name: Upload verification evidence
+        if: always() && (steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true')
+        uses: actions/upload-artifact@v4
+        with:
+          name: local4-verification
+          path: |
+            build/analysis/runtime-fixed.*
+            build/analysis/alt-fixed.png
+            build/analysis/manual-menu-fixed.png
+            build/patch-report.json
+            build/deb-staging/usr/share/doc/notion/build-manifest.json
 
       - name: Check package version and create checksum
         id: package
@@ -115,7 +140,7 @@ jobs:
 
           package="${packages[0]}"
           version="$(dpkg-deb --field "$package" Version)"
-          upstream_version="${version%+local3}"
+          upstream_version="${version%+local4}"
           expected_version="${{ steps.upstream.outputs.upstream_version || steps.tag.outputs.upstream_version }}"
           if [[ "$upstream_version" != "$expected_version" ]]; then
             echo "Expected Notion $expected_version but built package version is $version." >&2
@@ -137,11 +162,18 @@ jobs:
           Unofficial Linux repack of Notion ${{ steps.package.outputs.upstream_version }} for personal use.
 
           This package is built from Notion's official Windows installer and is not affiliated with or endorsed by Notion.
+
+          - Linux: Alt and Alt combinations no longer open the File/Edit/View/History/Window/Help popup. The manual menu remains available.
+          - AST-based compatibility patches fail if upstream targets change; build tools are pinned by the lockfile.
+          - SQLite is rebuilt for Electron; alternative SQLite prebuilds and the test extension are excluded.
+          - The package contains /usr/share/doc/notion/build-manifest.json with source, installer, ASAR, patch, and native-addon hashes.
+          - Regression tests and real keyboard/SQLite checks run before publication. Verification evidence is attached to this Actions run.
           EOF
 
           gh release create "${{ steps.upstream.outputs.tag || steps.tag.outputs.tag }}" \
             "${{ steps.package.outputs.path }}" \
             "${{ steps.package.outputs.path }}.sha256" \
             --target "$GITHUB_SHA" \
-            --title "Notion ${{ steps.package.outputs.upstream_version }} for Linux" \
+            --title "Notion ${{ steps.package.outputs.version }} for Linux" \
+            --latest \
             --notes-file release-notes.md

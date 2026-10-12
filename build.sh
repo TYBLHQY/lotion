@@ -15,6 +15,9 @@ for required_command in 7z node npm file dpkg-deb; do
   fi
 done
 
+# Pin the parser, packager, ASAR utility and native rebuild tool with npm's lockfile.
+npm ci --prefix "$PROJECT_ROOT" --ignore-scripts --no-audit --no-fund
+
 rm -rf "$EXTRACT_DIR" "$BUILD_DIR/payload" "$APP_DIR"
 mkdir -p "$EXTRACT_DIR"
 
@@ -58,12 +61,11 @@ if [[ ! -f "$ASAR_FILE" ]]; then
   exit 1
 fi
 
-NPM_CACHE_DIR="$(npm config get cache)"
-ASAR_BIN="$(find "$NPM_CACHE_DIR/_npx" -type f -path '*/node_modules/@electron/asar/bin/asar.js' -print -quit 2>/dev/null || true)"
-if [[ -n "$ASAR_BIN" ]]; then
-  node "$ASAR_BIN" extract "$ASAR_FILE" "$APP_DIR"
-else
-  npx --yes @electron/asar extract "$ASAR_FILE" "$APP_DIR"
+"$PROJECT_ROOT/node_modules/.bin/asar" extract "$ASAR_FILE" "$APP_DIR"
+APP_VERSION="$(node -p "require('$APP_DIR/package.json').version")"
+if [[ -n "${NOTION_EXPECTED_VERSION:-}" && "$APP_VERSION" != "$NOTION_EXPECTED_VERSION" ]]; then
+  printf 'Expected Notion %s but extracted %s.\n' "$NOTION_EXPECTED_VERSION" "$APP_VERSION" >&2
+  exit 1
 fi
 
 ELECTRON_VERSION="$(node -p "require('$APP_DIR/package.json').devDependencies.electron")"
@@ -94,7 +96,7 @@ cp -a "$SQLITE_SOURCE_DIR"/. "$SQLITE_MODULE"/
 
 (
   cd "$SQLITE_MODULE"
-  npx --yes node-gyp rebuild \
+  "$PROJECT_ROOT/node_modules/.bin/node-gyp" rebuild \
     --force_build=1 \
     --target="$ELECTRON_VERSION" \
     --arch=x64 \
@@ -107,6 +109,11 @@ if [[ ! -f "$SQLITE_BINARY" ]] || file "$SQLITE_BINARY" | grep -qi 'PE32'; then
   exit 1
 fi
 
+# Ship the Electron-targeted x64 rebuild, without npm's alternative platform
+# prebuilds or its native test extension being eligible for load-time fallback.
+rm -rf "$SQLITE_MODULE/prebuilds"
+rm -f "$SQLITE_MODULE/build/Release/test_extension.node"
+
 MAIN_BUNDLE="$APP_DIR/.webpack/main/index.js"
 if [[ ! -f "$MAIN_BUNDLE" ]]; then
   printf 'Could not find the expected Electron main bundle: %s\n' "$MAIN_BUNDLE" >&2
@@ -114,40 +121,8 @@ if [[ ! -f "$MAIN_BUNDLE" ]]; then
 fi
 
 printf 'Applying Linux compatibility patches...\n'
-node - "$MAIN_BUNDLE" <<'NODE'
-const fs = require('node:fs')
-const bundlePath = process.argv[2]
-let bundle = fs.readFileSync(bundlePath, 'utf8')
-const replacements = [
-  [
-    'return!(!n||!r)||"win32"===process.platform',
-    'return!(!n||!r)||"linux"===process.platform',
-  ],
-  [
-    'n="win32"===process.platform?function(e,t){const{isOpenAtLoginEnabled:n,isQuickSearchEnabled:r,isHideLastWindowOnCloseEnabled:o}=t;',
-    'n="linux"===process.platform?function(e,t){const{isOpenAtLoginEnabled:n,isQuickSearchEnabled:r,isHideLastWindowOnCloseEnabled:o}=t;',
-  ],
-  [
-    'o="win32"===process.platform?[{type:"separator"},(0,p.buildTroubleshootingMenu)(e,s.setSystemMenu),{type:"separator"}]:[]',
-    'o="linux"===process.platform?[{type:"separator"},(0,p.buildTroubleshootingMenu)(e,s.setSystemMenu),{type:"separator"}]:[]',
-  ],
-]
-for (const [before, after] of replacements) {
-  if (bundle.split(before).length !== 2) {
-    console.error(`Expected exactly one Linux patch target; found ${bundle.split(before).length - 1}.`)
-    process.exit(1)
-  }
-  bundle = bundle.replace(before, after)
-}
-const windowsTrayBinding = 'this.tray=new l.Tray(this.getIcon()),this.tray.on("click",()=>{this.onClick()}),this.tray.on("right-click",()=>this.onRightClick()),this.tray.setToolTip(l.app.getName())'
-const linuxTrayBinding = 'this.tray=new l.Tray(this.getIcon()),"linux"===process.platform?this.tray.setContextMenu(this.trayMenu):this.tray.on("right-click",()=>this.onRightClick()),this.tray.on("click",()=>{this.onClick()}),this.tray.setToolTip(l.app.getName())'
-if (bundle.split(windowsTrayBinding).length !== 2) {
-  console.error('Expected tray event binding was not found; refusing to patch an unknown app build.')
-  process.exit(1)
-}
-bundle = bundle.replace(windowsTrayBinding, linuxTrayBinding)
-fs.writeFileSync(bundlePath, bundle)
-NODE
+NOTION_TEST_BUNDLE="$MAIN_BUNDLE" npm test --prefix "$PROJECT_ROOT"
+node "$PROJECT_ROOT/scripts/patch-notion.cjs" "$MAIN_BUNDLE" "$BUILD_DIR/patch-report.json"
 
 INSTALLER_ICON="$BUILD_DIR/payload/resources/icon-production.png"
 if [[ ! -f "$INSTALLER_ICON" ]]; then
@@ -184,15 +159,15 @@ if [[ ! "$APP_PROTOCOL" =~ ^[a-z][a-z0-9+.-]*$ ]]; then
   exit 1
 fi
 cd "$APP_DIR"
-npx --yes electron-builder --linux deb --config.npmRebuild=false --publish never
+"$PROJECT_ROOT/node_modules/.bin/electron-builder" --linux deb --config.npmRebuild=false --publish never
 
 mkdir -p "$PROJECT_ROOT/dist"
-rm -f "$PROJECT_ROOT/dist"/*.deb
-find "$APP_DIR/dist" -maxdepth 1 -type f -name '*.deb' -exec cp -f {} "$PROJECT_ROOT/dist/" \;
-if ! find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print -quit | grep -q .; then
-  printf 'electron-builder finished but did not produce a .deb package.\n' >&2
+mapfile -d '' -t BUILT_PACKAGES < <(find "$APP_DIR/dist" -maxdepth 1 -type f -name '*.deb' -print0)
+if [[ ${#BUILT_PACKAGES[@]} -ne 1 ]]; then
+  printf 'Expected exactly one electron-builder .deb, found %s.\n' "${#BUILT_PACKAGES[@]}" >&2
   exit 1
 fi
+BUILDER_PACKAGE="${BUILT_PACKAGES[0]}"
 
 printf 'Making the desktop icon path explicit...\n'
 while IFS= read -r -d '' DEB_PACKAGE; do
@@ -220,7 +195,9 @@ while IFS= read -r -d '' DEB_PACKAGE; do
     printf 'Could not find the expected upstream package version in the control file.\n' >&2
     exit 1
   fi
-  sed --in-place "s/^Version: $APP_VERSION$/Version: $APP_VERSION+local3/" "$PACKAGE_STAGING/DEBIAN/control"
+  sed --in-place "s/^Version: $APP_VERSION$/Version: $APP_VERSION+local4/" "$PACKAGE_STAGING/DEBIAN/control"
+  node "$PROJECT_ROOT/scripts/write-build-manifest.cjs" \
+    "$PROJECT_ROOT" "$APP_DIR" "$INSTALLER" "$PACKAGE_STAGING" "$ASAR_FILE"
   POST_INSTALL_SCRIPT="$PACKAGE_STAGING/DEBIAN/postinst"
   sed --in-place \
     -e '/^if hash update-mime-database /,/^fi$/d' \
@@ -251,10 +228,10 @@ SH
   PATCHED_PACKAGE="$DEB_PACKAGE.patched"
   dpkg-deb --build --root-owner-group "$PACKAGE_STAGING" "$PATCHED_PACKAGE" >/dev/null
   mv -f "$PATCHED_PACKAGE" "$DEB_PACKAGE"
-done < <(find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print0)
+done < <(printf '%s\0' "$BUILDER_PACKAGE")
 
-BUILT_PACKAGE="$(find "$PROJECT_ROOT/dist" -maxdepth 1 -type f -name '*.deb' -print -quit)"
-FINAL_PACKAGE="$PROJECT_ROOT/dist/Notion_${APP_VERSION}+local3_amd64.deb"
-mv -f "$BUILT_PACKAGE" "$FINAL_PACKAGE"
+FINAL_PACKAGE="$PROJECT_ROOT/dist/Notion_${APP_VERSION}+local4_amd64.deb"
+mv -f "$BUILDER_PACKAGE" "$FINAL_PACKAGE"
+sha256sum "$FINAL_PACKAGE" > "$FINAL_PACKAGE.sha256"
 
 printf 'Build complete. Debian package(s) are in %s\n' "$PROJECT_ROOT/dist"
