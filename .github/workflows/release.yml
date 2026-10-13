@@ -147,7 +147,10 @@ jobs:
             exit 1
           fi
 
-          sha256sum "$package" > "$package.sha256"
+          (
+            cd "$(dirname "$package")"
+            sha256sum "$(basename "$package")" > "$(basename "$package").sha256"
+          )
           echo "path=$package" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"

@@ -232,6 +232,9 @@ done < <(printf '%s\0' "$BUILDER_PACKAGE")
 
 FINAL_PACKAGE="$PROJECT_ROOT/dist/Notion_${APP_VERSION}+local4_amd64.deb"
 mv -f "$BUILDER_PACKAGE" "$FINAL_PACKAGE"
-sha256sum "$FINAL_PACKAGE" > "$FINAL_PACKAGE.sha256"
+(
+  cd "$PROJECT_ROOT/dist"
+  sha256sum "$(basename "$FINAL_PACKAGE")" > "$(basename "$FINAL_PACKAGE").sha256"
+)
 
 printf 'Build complete. Debian package(s) are in %s\n' "$PROJECT_ROOT/dist"
