@@ -8,6 +8,7 @@ const [binary, mode] = process.argv.slice(2)
 if (!binary || !['old', 'fixed'].includes(mode)) throw new Error('Usage: verify-alt-menu.cjs BINARY old|fixed')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'lotion-alt-verification-'))
+fs.mkdirSync(path.join(profile, 'logs'), { recursive: true })
 const port = mode === 'old' ? 19241 : 19242
 const log = fs.openSync(path.resolve(`build/analysis/runtime-${mode}.log`), 'w')
 const app = child.spawn(path.resolve(binary), [`--inspect=127.0.0.1:${port}`,
@@ -120,7 +121,14 @@ async function run() {
   fs.writeFileSync(`build/analysis/runtime-${mode}.json`, JSON.stringify(result, null, 2) + '\n')
   console.log(JSON.stringify(result))
 }
-run().catch(error => { console.error(error); process.exitCode = 1 }).finally(async () => {
+run().catch(error => {
+  console.error(error)
+  try {
+    const lines = fs.readFileSync(path.resolve(`build/analysis/runtime-${mode}.log`), 'utf8').split('\n')
+    console.error('Recent Electron output:\n' + lines.slice(-80).join('\n'))
+  } catch {}
+  process.exitCode = 1
+}).finally(async () => {
   if (ws?.readyState === WebSocket.OPEN) {
     try { await evaluate('__verifyElectron.app.quit()') } catch {}
     ws.close()
