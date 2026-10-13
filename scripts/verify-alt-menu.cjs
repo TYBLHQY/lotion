@@ -52,7 +52,17 @@ async function run() {
     if (data.error) request.reject(new Error(JSON.stringify(data.error)))
     else request.resolve(data.result)
   }
-  await evaluate('globalThis.__verifyElectron=process.mainModule.require("electron");true')
+  await evaluate(`globalThis.__verifyElectron=(()=>{
+    const fromMain=process.mainModule?.require;
+    const fromExecutable=process.getBuiltinModule('module').createRequire(process.execPath);
+    for(const load of [fromMain?.bind(process.mainModule),globalThis.require,fromExecutable]){
+      try{const electron=load?.('electron');if(electron?.BrowserWindow)return electron}catch{}
+    }
+    throw new Error('Could not access Electron main-process API: '+JSON.stringify({
+      hasMainModule:Boolean(process.mainModule),hasGlobalRequire:typeof globalThis.require==='function',
+      electron:process.versions.electron,node:process.versions.node,execPath:process.execPath
+    }));
+  })();true`)
   let handle
   for (let i = 0; i < 100; i++) {
     handle = await evaluate('(()=>{const w=__verifyElectron.BrowserWindow.getAllWindows().find(w=>w.isVisible());if(!w)return null;globalThis.__verifyWindow=w;w.focus();return w.getNativeWindowHandle().readUInt32LE(0)})()')
