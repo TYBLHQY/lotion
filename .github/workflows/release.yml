@@ -2,37 +2,55 @@ name: Build and publish Notion Linux package
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+    paths:
+      - '.github/workflows/release.yml'
+      - 'scripts/check-upstream.cjs'
+      - 'scripts/publish-release.cjs'
+      - 'tests/check-upstream.test.cjs'
+      - 'tests/publish-release.test.cjs'
   schedule:
-    - cron: '17 9 * * 1'
+    - cron: '17 */6 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# Schedule, manual checks and tag builds must not race to publish one version.
+concurrency:
+  group: notion-linux-release
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@v5
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            build-essential curl file p7zip-full python3 dpkg-dev \
-            xvfb xauth xdotool imagemagick libgtk-3-0 libnss3 libasound2 libgbm1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
           node-version: '24.19.0'
 
+      - name: Test update detection and release retries
+        run: node --test tests/check-upstream.test.cjs tests/publish-release.test.cjs
+
+      - name: Install version probe dependencies
+        if: github.ref_type != 'tag'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends curl p7zip-full
+
       - name: Check upstream version
         id: upstream
-        if: github.event_name != 'push'
+        if: github.ref_type != 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -42,7 +60,11 @@ jobs:
           installer="$GITHUB_WORKSPACE/build/inputs/notion-windows-installer.exe"
           mkdir -p "$probe_dir/installer" "$probe_dir/payload" "$(dirname "$installer")"
 
-          curl --fail --location --retry 3 \
+          # Keep API failures separate from an actually empty release history.
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > "$probe_dir/releases.json"
+
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
             'https://www.notion.so/desktop/windows/download' \
             --output "$installer"
           7z x -y "$installer" '$PLUGINSDIR/app-64.7z' \
@@ -63,31 +85,29 @@ jobs:
             cd "$probe_dir"
             npx --yes @electron/asar@4.3.1 extract-file "$asar_file" package.json
           )
-          upstream_version="$(node -p "require('$probe_dir/package.json').version")"
-          if [[ ! "$upstream_version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
-            echo "Unexpected Notion version: $upstream_version" >&2
-            exit 1
-          fi
+          node scripts/check-upstream.cjs "$probe_dir/package.json" "$probe_dir/releases.json" \
+            | tee -a "$GITHUB_OUTPUT"
+          echo "installer_sha256=$(sha256sum "$installer" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
-          released_versions="$(gh release list --repo "$GITHUB_REPOSITORY" \
-            --limit 100 --json tagName --jq '.[].tagName' \
-            | sed -n 's/^v//p' | sed 's/+local[0-9]*$//' | grep -E '^[0-9]+(\.[0-9]+)*$' || true)"
-          latest_released="$(printf '%s\n' "$released_versions" | sort -V | tail -n 1)"
-          if [[ -n "$latest_released" ]] && \
-            [[ "$(printf '%s\n%s\n' "$latest_released" "$upstream_version" | sort -V | tail -n 1)" == "$latest_released" ]]; then
-            echo "Notion $upstream_version is not newer than the latest release v$latest_released; skipping build."
-            echo 'should_build=false' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "New Notion version found: $upstream_version"
-          echo "tag=v$upstream_version+local4" >> "$GITHUB_OUTPUT"
-          echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
-          echo 'should_build=true' >> "$GITHUB_OUTPUT"
+      - name: Summarize upstream check
+        if: github.ref_type != 'tag'
+        env:
+          UPSTREAM_VERSION: ${{ steps.upstream.outputs.upstream_version }}
+          LATEST_RELEASED: ${{ steps.upstream.outputs.latest_released_version }}
+          CHECK_REASON: ${{ steps.upstream.outputs.reason }}
+          INSTALLER_SHA256: ${{ steps.upstream.outputs.installer_sha256 }}
+        run: |
+          {
+            printf '## Notion EXE update check\n\n'
+            printf 'Official EXE version: %s. Latest complete release: %s.\n\n' \
+              "$UPSTREAM_VERSION" "${LATEST_RELEASED:-none}"
+            printf '%s\n\n' "$CHECK_REASON"
+            printf 'Installer SHA-256: `%s`\n' "$INSTALLER_SHA256"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Select tag for pushed release
         id: tag
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag'
         shell: bash
         run: |
           set -euo pipefail
@@ -100,6 +120,14 @@ jobs:
           version="${tag#v}"
           echo "upstream_version=${version%+local4}" >> "$GITHUB_OUTPUT"
           echo 'should_build=true' >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential curl file p7zip-full python3 dpkg-dev \
+            xvfb xauth xdotool imagemagick libgtk-3-0 libnss3 libasound2 libgbm1
 
       - name: Build Debian package
         if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
@@ -159,6 +187,9 @@ jobs:
         if: steps.upstream.outputs.should_build == 'true' || steps.tag.outputs.should_build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.upstream.outputs.tag || steps.tag.outputs.tag }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
         run: |
           set -euo pipefail
           cat > release-notes.md <<EOF
@@ -173,10 +204,5 @@ jobs:
           - Regression tests and real keyboard/SQLite checks run before publication. Verification evidence is attached to this Actions run.
           EOF
 
-          gh release create "${{ steps.upstream.outputs.tag || steps.tag.outputs.tag }}" \
-            "${{ steps.package.outputs.path }}" \
-            "${{ steps.package.outputs.path }}.sha256" \
-            --target "$GITHUB_SHA" \
-            --title "Notion ${{ steps.package.outputs.version }} for Linux" \
-            --latest \
-            --notes-file release-notes.md
+          node scripts/publish-release.cjs "$RELEASE_TAG" "$PACKAGE_VERSION" \
+            "$PACKAGE_PATH" release-notes.md

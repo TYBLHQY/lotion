@@ -106,9 +106,27 @@ owns that handler, select Notion as the default with
 
 ## Publish releases with GitHub Actions
 
-The workflow checks the official Windows installer every Monday and can also
-be started manually from the Actions tab. It reads the version from the
-installer and only builds when that version is newer than the latest release.
+The workflow checks the official Windows installer every six hours, at 00:17,
+06:17, 12:17 and 18:17 UTC. In the Actions tab, select **Build and publish Notion
+Linux package** and use **Run workflow** on `main` to check immediately. Changes
+to the update workflow or its detection/publication scripts on `main` also run
+a check. GitHub can delay scheduled runs, so these are planned check times.
+
+The check downloads the official EXE and reads the version embedded in its
+`app.asar/package.json`. It compares numeric version components against all
+published stable releases, counting a release only when it has a matching,
+nonempty DEB and SHA-256 asset pair. Drafts, prereleases and incomplete uploads
+do not mark a version as successfully packaged. When the EXE is newer, the
+build reuses that exact downloaded file and checks the extracted version again.
+When it is the same version or older, the workflow skips the build, including
+native build dependencies, and records the decision in the run summary. The
+summary also records the installer SHA-256. A changed installer with the same
+embedded version does not create a second release.
+
+Release-history API failures, invalid installer versions and extraction errors
+fail the check instead of being treated as a new version. All check and release
+triggers share one concurrency group, without cancelling an active build.
+There is no separate version file to advance before a build succeeds.
 
 You can also publish a specific version by pushing a matching tag, for example:
 
@@ -119,10 +137,28 @@ git push origin v7.37.1+local4
 
 The workflow builds the package on Ubuntu, checks that the package matches the
 upstream version, and runs the Alt-menu keyboard and SQLite checks under Xvfb.
-After these pass it publishes the DEB and SHA-256 checksum as a GitHub Release.
+After these pass it uploads the DEB and SHA-256 checksum to a draft GitHub
+Release and publishes it only after both uploads succeed. A later check retries
+failed builds and resumes incomplete releases, uploading a consistent asset
+pair before publication. Complete published releases are left unchanged.
 Verification logs, screenshots, and the build manifest are saved as an Actions
 artifact. Scheduled releases use the `+local4` suffix as well. The installer and
 generated package are not committed to Git.
+
+The update and publication regression tests run without downloading Notion or
+installing npm dependencies:
+
+```sh
+node --test tests/check-upstream.test.cjs tests/publish-release.test.cjs
+```
+
+These tests exercise version ordering, pagination, skip/build decisions, invalid
+responses and interrupted uploads. The existing upstream Alt-menu tests still
+run during an actual package build. As with other public GitHub repositories,
+scheduled workflows can be disabled after 60 days without repository activity;
+re-enable the workflow in Actions if GitHub shows it as disabled. See GitHub's
+[scheduled workflow documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+for scheduling behavior.
 
 ## What this experiment can and cannot establish
 
