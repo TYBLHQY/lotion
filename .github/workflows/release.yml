@@ -26,6 +26,8 @@ concurrency:
 
 jobs:
   build-and-release:
+    # Repair branches use the pull-request verifier, never the publisher.
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'push' && github.ref_type == 'tag')
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
