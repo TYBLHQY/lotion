@@ -15,7 +15,7 @@ for required_command in 7z node npm file dpkg-deb; do
   fi
 done
 
-# Pin the parser, packager, ASAR utility and native rebuild tool with npm's lockfile.
+# Pin the parsers, packager and native rebuild tools/headers with npm's lockfile.
 npm ci --prefix "$PROJECT_ROOT" --ignore-scripts --no-audit --no-fund
 
 rm -rf "$EXTRACT_DIR" "$BUILD_DIR/payload" "$APP_DIR"
@@ -92,10 +92,11 @@ fi
 rm -rf "$SQLITE_SOURCE_DIR"
 mkdir -p "$SQLITE_SOURCE_DIR"
 tar -xzf "$SQLITE_TARBALL" -C "$SQLITE_SOURCE_DIR" --strip-components=1
-cp -a "$SQLITE_SOURCE_DIR"/. "$SQLITE_MODULE"/
 
+# Build in the clean source tree, so binding.gyp resolves the locked
+# node-addon-api from this repo rather than the extracted Windows payload.
 (
-  cd "$SQLITE_MODULE"
+  cd "$SQLITE_SOURCE_DIR"
   "$PROJECT_ROOT/node_modules/.bin/node-gyp" rebuild \
     --force_build=1 \
     --target="$ELECTRON_VERSION" \
@@ -103,11 +104,12 @@ cp -a "$SQLITE_SOURCE_DIR"/. "$SQLITE_MODULE"/
     --dist-url=https://electronjs.org/headers
 )
 
-SQLITE_BINARY="$SQLITE_MODULE/build/Release/better_sqlite3.node"
-if [[ ! -f "$SQLITE_BINARY" ]] || file "$SQLITE_BINARY" | grep -qi 'PE32'; then
-  printf 'better-sqlite3 is still a Windows binary; Linux rebuild did not produce a usable module.\n' >&2
+SQLITE_BINARY="$SQLITE_SOURCE_DIR/build/Release/better_sqlite3.node"
+if [[ ! -f "$SQLITE_BINARY" ]] || ! file -b "$SQLITE_BINARY" | grep -q '^ELF 64-bit.*x86-64'; then
+  printf 'Linux rebuild did not produce an x86-64 ELF better-sqlite3 module.\n' >&2
   exit 1
 fi
+cp -a "$SQLITE_SOURCE_DIR"/. "$SQLITE_MODULE"/
 
 # Ship the Electron-targeted x64 rebuild, without npm's alternative platform
 # prebuilds or its native test extension being eligible for load-time fallback.

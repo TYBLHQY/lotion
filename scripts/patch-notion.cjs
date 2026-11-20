@@ -32,16 +32,40 @@ function patchBundle(source) {
   }
   const text = node => source.slice(node.start, node.end)
 
-  const trayMethods = collect(ast, 'MethodDefinition', node =>
-    node.key.name === 'getIsEnabled' && text(node).includes('isMenuBarIconEnabled'))
+  const trayClasses = collect(ast, 'ClassBody', node =>
+    node.body.some(method => method.key?.name === 'getIsEnabled' && text(method).includes('isMenuBarIconEnabled')))
+  if (trayClasses.length !== 1) throw new Error(`tray controller: expected one class, found ${trayClasses.length}`)
+  const trayClass = trayClasses[0]
+  const trayMethods = trayClass.body.filter(node => node.key?.name === 'getIsEnabled')
   const trayTests = trayMethods.flatMap(node => collect(node, 'BinaryExpression', n => isPlatformTest(n, 'win32')))
   selectOne('linux-tray-enabled', trayTests, '"linux"===process.platform')
 
-  const preferences = collect(ast, 'ConditionalExpression', node =>
-    isPlatformTest(node.test, 'win32') && node.consequent.type === 'CallExpression' &&
-    node.consequent.callee.type === 'FunctionExpression' &&
-    ['isOpenAtLoginEnabled', 'isQuickSearchEnabled', 'isHideLastWindowOnCloseEnabled']
-      .every(key => text(node.consequent).includes(key)))
+  const preferenceKeys = ['isOpenAtLoginEnabled', 'isQuickSearchEnabled', 'isHideLastWindowOnCloseEnabled']
+  const preferences = []
+  walk.ancestor(ast, { ConditionalExpression(node, ancestors) {
+    if (!isPlatformTest(node.test, 'win32')) return
+    const branch = node.consequent
+    const hasPreferenceKeys = expression => preferenceKeys.every(key => text(expression).includes(key))
+    // Older bundles inline the menu builder; newer ones call a helper in
+    // the same module and wrap the returned menu item in an array.
+    if (branch.type === 'CallExpression' && branch.callee.type === 'FunctionExpression' &&
+        hasPreferenceKeys(branch)) {
+      preferences.push(node)
+      return
+    }
+    if (branch.type !== 'ArrayExpression' || branch.elements.length !== 1) return
+    const [call] = branch.elements
+    if (call?.type !== 'CallExpression' || call.callee.type !== 'Identifier') return
+    for (let i = ancestors.length - 2; i >= 0; i--) {
+      const block = ancestors[i]
+      if (block.type !== 'BlockStatement') continue
+      const helper = block.body.find(statement =>
+        statement.type === 'FunctionDeclaration' && statement.id.name === call.callee.name)
+      if (!helper) continue
+      if (hasPreferenceKeys(helper) && text(helper).includes('.launchPreferences')) preferences.push(node)
+      break
+    }
+  } })
   selectOne('linux-launch-preferences', preferences.map(node => node.test), '"linux"===process.platform')
 
   const troubleshooting = collect(ast, 'ConditionalExpression', node =>
@@ -49,14 +73,18 @@ function patchBundle(source) {
     text(node.consequent).includes('.buildTroubleshootingMenu'))
   selectOne('linux-troubleshooting-menu', troubleshooting.map(node => node.test), '"linux"===process.platform')
 
-  const rightClicks = collect(ast, 'CallExpression', node =>
+  const findRightClicks = root => collect(root, 'CallExpression', node =>
     property(node.callee, 'on') && property(node.callee.object, 'tray') &&
     node.callee.object.object.type === 'ThisExpression' &&
     node.arguments[0]?.value === 'right-click' &&
     node.arguments[1]?.type === 'ArrowFunctionExpression' &&
     property(node.arguments[1].body.callee, 'onRightClick'))
-  selectOne('linux-native-tray-menu', rightClicks, node =>
-    `("linux"===process.platform?this.tray.setContextMenu(this.trayMenu):${text(node)})`)
+  const trayMenu = node => `("linux"===process.platform?this.tray.setContextMenu(this.trayMenu):${text(node)})`
+  const watcherRestart = trayClass.body.filter(method => method.key?.name === 'recreateTrayForWatcherRestart')
+  if (watcherRestart.length > 1) throw new Error('tray watcher restart: found multiple methods')
+  const restartClicks = watcherRestart.flatMap(findRightClicks)
+  if (watcherRestart.length) selectOne('linux-native-tray-menu-watcher-restart', restartClicks, trayMenu)
+  selectOne('linux-native-tray-menu', findRightClicks(trayClass).filter(node => !restartClicks.includes(node)), trayMenu)
 
   for (const phase of ['down', 'up']) {
     const channel = `notion:alt-key-${phase}`
@@ -88,11 +116,11 @@ function patchBundle(source) {
 
 module.exports = { patchBundle, parse, collectHandlers }
 
-function collectHandlers(source) {
+function collectHandlers(source, channels = ['notion:alt-key-down', 'notion:alt-key-up']) {
   const handlers = {}
   walk.simple(parse(source), { CallExpression(node) {
     if (property(node.callee, 'addListener') &&
-        ['notion:alt-key-down', 'notion:alt-key-up'].includes(node.arguments[0]?.value)) {
+        channels.includes(node.arguments[0]?.value)) {
       handlers[node.arguments[0].value] = source.slice(node.arguments[1].start, node.arguments[1].end)
     }
   } })

@@ -18,10 +18,10 @@ function runAltSequence(source, platform) {
   const controller = new WindowController()
   for (const callback of Object.values(collectHandlers(source))) {
     const appSymbol = callback.match(/([\w$]+)\.appController/)[1]
-    const windowSymbol = callback.match(/([\w$]+)\.WindowController/)[1]
+    const [, windowSymbol, controllerClass] = callback.match(/([\w$]+)\.((?:Classic)?WindowController)\b/)
     const context = { process: { platform },
       [appSymbol]: { appController: { getWindowControllerForWebContents: () => controller } },
-      [windowSymbol]: { WindowController } }
+      [windowSymbol]: { [controllerClass]: WindowController } }
     vm.runInNewContext(`(${callback})`, context)({ sender: {} })
   }
   return actions
@@ -37,13 +37,15 @@ test('Windows retains its Alt menu and macOS retains its existing behavior', () 
   assert.deepEqual(runAltSequence(patched, 'win32'), runAltSequence(original, 'win32'))
   assert.deepEqual(runAltSequence(patched, 'darwin'), [])
 })
-test('the mouse menu popup implementation is retained byte for byte', () => {
-  const extract = s => s.match(/\.showAppMenu=function\(\)\{.*?(?=,\w+\.closeAppMenu=function)/s)?.[0]
-  assert.ok(extract(original))
-  assert.equal(extract(original), extract(patched))
+test('the manual app-menu handler is retained byte for byte', () => {
+  const channel = 'notion:open-app-menu'
+  const before = collectHandlers(original, [channel])[channel]
+  const after = collectHandlers(patched, [channel])[channel]
+  assert.match(before, /\.showAppMenu\b/)
+  assert.equal(after, before)
 })
 test('unknown upstream handlers fail instead of silently omitting the Alt fix', () => {
   assert.throws(() => patchBundle(original.replace('notion:alt-key-up', 'notion:unknown-key-up')), /expected one IPC handler/)
   assert.throws(() => patchBundle(patched), /expected one structural target/)
-  assert.equal(report.changes.length, 6)
+  assert.equal(report.changes.length, original.includes('recreateTrayForWatcherRestart(){') ? 7 : 6)
 })
