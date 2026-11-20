@@ -1,0 +1,51 @@
+name: Verify Notion Linux package
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-linux.yml'
+      - '.github/workflows/release.yml'
+      - 'build.sh'
+      - 'launch-notion.sh'
+      - 'package*.json'
+      - 'scripts/**'
+      - 'tests/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24.19.0'
+
+      - name: Install build and runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential curl file p7zip-full python3 dpkg-dev \
+            xvfb xauth xdotool imagemagick libgtk-3-0 libnss3 libasound2 libgbm1
+
+      - name: Build Debian package
+        run: ./build.sh
+
+      - name: Check Debian package
+        shell: bash
+        run: |
+          cd dist
+          sha256sum --check -- *.deb.sha256
+          dpkg-deb --field ./*.deb Package Version Architecture
+
+      - name: Verify Alt menu and SQLite in assembled app
+        run: |
+          mkdir -p build/analysis
+          xvfb-run -a node scripts/verify-alt-menu.cjs build/deb-staging/opt/Notion/notion fixed
